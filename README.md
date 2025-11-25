@@ -79,6 +79,10 @@ The `./scripts/stamp` command provides a unified interface for managing stamps:
 # Check deployment status
 ./scripts/stamp status swc-dev
 
+# Get AKS credentials
+./scripts/stamp credentials swc-dev
+./scripts/stamp creds swc-dev --admin
+
 # Destroy a stamp
 ./scripts/stamp destroy swc-dev
 
@@ -318,11 +322,27 @@ terraform/
     ├── stamp/          # Stamp catalog and naming conventions
     ├── networking/     # Reusable networking logic
     └── compute/        # Reusable compute logic (Java-optimized AKS)
+apps/
+├── README.md           # Application deployment documentation
+└── petclinic/          # Spring PetClinic Helm chart
+    ├── Chart.yaml
+    ├── values.yaml     # Default values
+    ├── values-dev.yaml # Dev environment overrides
+    ├── values-staging.yaml
+    ├── values-prod.yaml
+    └── templates/      # Kubernetes manifests
 scripts/
 ├── stamp               # Unified CLI for stamp management
+├── deploy-app.sh       # Deploy applications to AKS
 ├── init-layer.sh       # Initialize layer with backend config
 ├── apply-layer.sh      # Apply a layer
 └── destroy-layer.sh    # Destroy a layer
+pipelines/
+├── bootstrap.yml       # Create shared state backend
+├── deploy-stamp.yml    # Deploy infrastructure
+├── deploy-app.yml      # Deploy applications to AKS
+├── destroy-stamp.yml   # Destroy infrastructure
+└── pr-validation.yml   # Validate on PRs
 Makefile                # Convenience shortcuts
 .env.example            # Environment template
 ```
@@ -371,6 +391,59 @@ See [pipelines/README.md](pipelines/README.md) for complete setup instructions.
 4. Import pipelines from the `pipelines/` directory
 5. Run bootstrap pipeline once
 6. Use deploy-stamp pipeline for deployments
+
+---
+
+## Application Deployment
+
+Once infrastructure is deployed, you can deploy applications to AKS clusters using Helm.
+
+### Available Applications
+
+| Application | Description |
+|-------------|-------------|
+| `petclinic` | Spring PetClinic - Java demo application for testing deployments |
+
+### Using the CLI
+
+```bash
+# Deploy petclinic to swc-dev
+./scripts/deploy-app.sh swc-dev petclinic
+
+# Deploy to a specific namespace
+./scripts/deploy-app.sh swc-dev petclinic petclinic deploy
+
+# Dry run (see what would be deployed)
+./scripts/deploy-app.sh swc-dev petclinic default dry-run
+
+# Uninstall
+./scripts/deploy-app.sh swc-dev petclinic default uninstall
+```
+
+### Using Azure DevOps Pipeline
+
+Use the `deploy-app.yml` pipeline for CI/CD deployments:
+
+1. Go to **Pipelines** → **deploy-app.yml**
+2. Select the target stamp (determines which AKS cluster)
+3. Choose the application to deploy
+4. Specify namespace (default: `default`)
+5. Choose action: `deploy`, `uninstall`, or `dry-run`
+6. Run the pipeline (production stamps require approval)
+
+### Environment-Specific Configuration
+
+Each stamp's environment (dev/staging/prod) automatically selects the appropriate values file:
+
+| Stamp | Environment | Values File |
+|-------|-------------|-------------|
+| `swc-dev` | dev | `values-dev.yaml` |
+| `swc-staging` | staging | `values-staging.yaml` |
+| `swc-prod` | prod | `values-prod.yaml` |
+| `neu-dev` | dev | `values-dev.yaml` |
+| `neu-prod` | prod | `values-prod.yaml` |
+
+See [apps/README.md](apps/README.md) for detailed application documentation.
 
 ---
 

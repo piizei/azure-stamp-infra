@@ -1,0 +1,16 @@
+apiVersion: v2
+name: petclinic
+description: Spring PetClinic - A sample Java application for testing AKS deployments
+type: application
+version: 1.0.0
+appVersion: "3.2.0"
+keywords:
+  - spring
+  - java
+  - demo
+  - petclinic
+home: https://github.com/spring-projects/spring-petclinic
+sources:
+  - https://github.com/spring-projects/spring-petclinic
+maintainers:
+  - name: Platform Team

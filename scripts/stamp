@@ -14,6 +14,7 @@
 #   deploy-all <stamp_id>   Bootstrap (if needed) + init + deploy
 #   destroy <stamp_id>      Destroy layers in reverse order
 #   status [stamp_id]       Show deployment status (all stamps if no ID given)
+#   credentials <stamp_id>  Get AKS credentials for a stamp (alias: creds, kubeconfig)
 #   validate                Validate Terraform configuration for all layers
 #   fmt                     Format all Terraform files
 #
@@ -826,6 +827,52 @@ cmd_fmt() {
   log_success "Formatting complete!"
 }
 
+cmd_credentials() {
+  local stamp_id="$1"
+  local admin_flag=""
+  
+  # Check for --admin flag
+  shift || true
+  for arg in "$@"; do
+    case "$arg" in
+      --admin|-a)
+        admin_flag="--admin"
+        ;;
+    esac
+  done
+  
+  local resource_group="rg-${stamp_id}-compute"
+  local aks_name="aks-${stamp_id}"
+  
+  log_info "Getting AKS credentials for stamp: $stamp_id"
+  echo "  Resource Group: $resource_group"
+  echo "  AKS Cluster:    $aks_name"
+  echo ""
+  
+  # Check if cluster exists
+  if ! az aks show -g "$resource_group" -n "$aks_name" &>/dev/null; then
+    log_error "AKS cluster '$aks_name' not found in resource group '$resource_group'"
+    echo ""
+    echo "Make sure the compute layer is deployed:"
+    echo "  ./scripts/stamp deploy $stamp_id --layers compute"
+    exit 1
+  fi
+  
+  # Get credentials
+  if [[ -n "$admin_flag" ]]; then
+    log_warn "Getting admin credentials..."
+    az aks get-credentials -g "$resource_group" -n "$aks_name" --admin --overwrite-existing
+  else
+    az aks get-credentials -g "$resource_group" -n "$aks_name" --overwrite-existing
+  fi
+  
+  log_success "Credentials configured!"
+  echo ""
+  kubectl cluster-info
+  echo ""
+  log_info "Current context: $(kubectl config current-context)"
+}
+
 cmd_help() {
   cat << 'EOF'
 stamp - Unified CLI for managing Azure stamp deployments
@@ -842,6 +889,7 @@ Commands:
   deploy-all <stamp_id>   Bootstrap (if needed) + init + deploy
   destroy <stamp_id>      Destroy layers in reverse order
   status [stamp_id]       Show deployment status
+  credentials <stamp_id>  Get AKS credentials (alias: creds, kubeconfig)
   validate                Validate Terraform configuration
   fmt                     Format all Terraform files
   help                    Show this help message
@@ -860,6 +908,7 @@ Layer Selection:
 
 Options:
   --auto-approve, -y      Skip confirmation prompts
+  --admin, -a             Get admin credentials (for credentials command)
 
 Environment Variables:
   ARM_SUBSCRIPTION_ID     Azure subscription ID
@@ -894,6 +943,10 @@ Examples:
   
   # Plan changes before applying
   ./scripts/stamp plan swc-dev
+  
+  # Get AKS credentials
+  ./scripts/stamp credentials swc-dev
+  ./scripts/stamp creds swc-dev --admin
   
   # Destroy a stamp
   ./scripts/stamp destroy swc-dev
@@ -940,6 +993,10 @@ main() {
       ;;
     status|st)
       cmd_status "$@"
+      ;;
+    credentials|creds|kubeconfig)
+      require_stamp_id "${1:-}"
+      cmd_credentials "$@"
       ;;
     validate)
       cmd_validate

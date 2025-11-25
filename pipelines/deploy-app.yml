@@ -1,0 +1,340 @@
+# Azure DevOps Pipeline: Deploy Application to AKS
+#
+# This pipeline deploys applications to AKS clusters using Helm.
+# The stamp selection determines which AKS cluster to target.
+#
+# Prerequisites:
+#   1. Infrastructure deployed for the target stamp (run deploy-stamp.yml first)
+#   2. Variable groups configured in ADO Library:
+#      - stamp-common: SUBSCRIPTION_ID
+#   3. Service connection with:
+#      - Contributor on subscription (for AKS access)
+#      - Azure Kubernetes Service Cluster User Role on AKS
+#
+# Usage:
+#   - Select target stamp (determines AKS cluster)
+#   - Choose application to deploy
+#   - Optionally specify namespace and release name
+#   - Production stamps require manual approval
+
+trigger: none  # Manual trigger only
+
+pr: none  # Don't run on PRs
+
+parameters:
+  # Stamp selection - determines which AKS cluster to target
+  - name: stamp
+    displayName: 'Target Stamp (AKS Cluster)'
+    type: string
+    default: 'swc-dev'
+    values:
+      - swc-dev
+      - swc-staging
+      - swc-prod
+      - neu-dev
+      - neu-prod
+
+  # Application selection
+  - name: application
+    displayName: 'Application to Deploy'
+    type: string
+    default: 'petclinic'
+    values:
+      - petclinic
+
+  # Kubernetes namespace
+  - name: namespace
+    displayName: 'Kubernetes Namespace'
+    type: string
+    default: 'default'
+
+  # Helm release name (defaults to app name)
+  - name: releaseName
+    displayName: 'Helm Release Name (leave empty for app name)'
+    type: string
+    default: ''
+
+  # Action: deploy or uninstall
+  - name: action
+    displayName: 'Action'
+    type: string
+    default: 'deploy'
+    values:
+      - deploy
+      - uninstall
+      - dry-run
+
+variables:
+  # Variable group with subscription ID
+  - group: stamp-common
+
+  # Derived variables
+  - name: stampId
+    value: ${{ parameters.stamp }}
+  - name: isProduction
+    value: ${{ contains(parameters.stamp, '-prod') }}
+  
+  # Determine environment from stamp suffix
+  - ${{ if contains(parameters.stamp, '-dev') }}:
+    - name: environment
+      value: 'dev'
+    - name: serviceConnection
+      value: 'azure-infra-dev'
+  - ${{ if contains(parameters.stamp, '-staging') }}:
+    - name: environment
+      value: 'staging'
+    - name: serviceConnection
+      value: 'azure-infra-staging'
+  - ${{ if contains(parameters.stamp, '-prod') }}:
+    - name: environment
+      value: 'prod'
+    - name: serviceConnection
+      value: 'azure-infra-prod'
+
+  # Resource names (matching stamp module naming)
+  - name: resourceGroup
+    value: 'rg-${{ parameters.stamp }}-compute'
+  - name: aksCluster
+    value: 'aks-${{ parameters.stamp }}'
+  
+  # Helm settings
+  - name: helmReleaseName
+    value: ${{ coalesce(parameters.releaseName, parameters.application) }}
+  - name: helmChartPath
+    value: 'apps/${{ parameters.application }}'
+
+stages:
+  # =============================================================================
+  # Validate Stage - Check prerequisites
+  # =============================================================================
+  - stage: Validate
+    displayName: 'Validate - ${{ parameters.stamp }}'
+    jobs:
+      - job: ValidateCluster
+        displayName: 'Validate AKS Cluster'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+
+          - task: AzureCLI@2
+            displayName: 'Validate AKS Cluster Exists'
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "🔍 Validating AKS cluster..."
+                echo "   Subscription: $(SUBSCRIPTION_ID)"
+                echo "   Resource Group: $(resourceGroup)"
+                echo "   AKS Cluster: $(aksCluster)"
+                echo ""
+                
+                # Check if cluster exists
+                if ! az aks show -g $(resourceGroup) -n $(aksCluster) --subscription $(SUBSCRIPTION_ID) &>/dev/null; then
+                  echo "❌ AKS cluster '$(aksCluster)' not found in resource group '$(resourceGroup)'"
+                  echo "   Please deploy infrastructure first using deploy-stamp.yml"
+                  exit 1
+                fi
+                
+                # Get cluster info
+                CLUSTER_STATE=$(az aks show -g $(resourceGroup) -n $(aksCluster) --subscription $(SUBSCRIPTION_ID) --query "provisioningState" -o tsv)
+                echo "✅ AKS cluster found"
+                echo "   State: ${CLUSTER_STATE}"
+                
+                if [ "$CLUSTER_STATE" != "Succeeded" ]; then
+                  echo "⚠️  Warning: Cluster is not in 'Succeeded' state"
+                fi
+              addSpnToEnvironment: true
+
+          - task: HelmInstaller@1
+            displayName: 'Install Helm'
+            inputs:
+              helmVersionToInstall: 'latest'
+
+          - script: |
+              echo "🔍 Validating Helm chart..."
+              cd $(helmChartPath)
+              helm lint .
+              
+              echo ""
+              echo "📋 Chart Information:"
+              helm show chart .
+            displayName: 'Validate Helm Chart'
+
+  # =============================================================================
+  # Approval Gate for Production
+  # =============================================================================
+  - ${{ if eq(variables.isProduction, true) }}:
+    - stage: Approval
+      displayName: 'Production Approval'
+      dependsOn: Validate
+      jobs:
+        - job: WaitForApproval
+          displayName: 'Manual Approval'
+          pool: server
+          steps:
+            - task: ManualValidation@0
+              displayName: 'Approve Production Deployment'
+              inputs:
+                notifyUsers: ''
+                instructions: |
+                  📦 **Application Deployment Request**
+                  
+                  **Target:** ${{ parameters.stamp }} (Production)
+                  **Application:** ${{ parameters.application }}
+                  **Namespace:** ${{ parameters.namespace }}
+                  **Action:** ${{ parameters.action }}
+                  
+                  Please review and approve to proceed with the deployment.
+                onTimeout: 'reject'
+              timeoutInMinutes: 1440  # 24 hours
+
+  # =============================================================================
+  # Deploy Stage
+  # =============================================================================
+  - stage: Deploy
+    displayName: '${{ parameters.action }} - ${{ parameters.stamp }}'
+    dependsOn:
+      - Validate
+      - ${{ if eq(variables.isProduction, true) }}:
+        - Approval
+    condition: succeeded()
+    jobs:
+      - job: DeployApplication
+        displayName: '${{ parameters.action }} ${{ parameters.application }}'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+
+          - task: HelmInstaller@1
+            displayName: 'Install Helm'
+            inputs:
+              helmVersionToInstall: 'latest'
+
+          - task: AzureCLI@2
+            displayName: 'Get AKS Credentials'
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az aks get-credentials \
+                  -g $(resourceGroup) \
+                  -n $(aksCluster) \
+                  --subscription $(SUBSCRIPTION_ID) \
+                  --overwrite-existing
+                
+                echo "✅ Connected to AKS cluster: $(aksCluster)"
+                kubectl cluster-info
+              addSpnToEnvironment: true
+
+          # Dry Run
+          - ${{ if eq(parameters.action, 'dry-run') }}:
+            - task: AzureCLI@2
+              displayName: 'Helm Dry Run'
+              inputs:
+                azureSubscription: $(serviceConnection)
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  cd $(helmChartPath)
+                  
+                  VALUES_FILE="values.yaml"
+                  ENV_VALUES_FILE="values-$(environment).yaml"
+                  
+                  HELM_ARGS="-f ${VALUES_FILE}"
+                  if [ -f "${ENV_VALUES_FILE}" ]; then
+                    HELM_ARGS="${HELM_ARGS} -f ${ENV_VALUES_FILE}"
+                    echo "📋 Using environment values: ${ENV_VALUES_FILE}"
+                  fi
+                  
+                  echo "🔍 Helm Dry Run for $(helmReleaseName)..."
+                  helm upgrade --install $(helmReleaseName) . \
+                    --namespace ${{ parameters.namespace }} \
+                    --create-namespace \
+                    ${HELM_ARGS} \
+                    --dry-run \
+                    --debug
+                addSpnToEnvironment: true
+
+          # Deploy
+          - ${{ if eq(parameters.action, 'deploy') }}:
+            - task: AzureCLI@2
+              displayName: 'Helm Deploy'
+              inputs:
+                azureSubscription: $(serviceConnection)
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  cd $(helmChartPath)
+                  
+                  VALUES_FILE="values.yaml"
+                  ENV_VALUES_FILE="values-$(environment).yaml"
+                  
+                  HELM_ARGS="-f ${VALUES_FILE}"
+                  if [ -f "${ENV_VALUES_FILE}" ]; then
+                    HELM_ARGS="${HELM_ARGS} -f ${ENV_VALUES_FILE}"
+                    echo "📋 Using environment values: ${ENV_VALUES_FILE}"
+                  fi
+                  
+                  echo "🚀 Deploying $(helmReleaseName) to namespace ${{ parameters.namespace }}..."
+                  helm upgrade --install $(helmReleaseName) . \
+                    --namespace ${{ parameters.namespace }} \
+                    --create-namespace \
+                    ${HELM_ARGS} \
+                    --wait \
+                    --timeout 10m
+                  
+                  echo ""
+                  echo "✅ Deployment complete!"
+                  echo ""
+                  echo "📋 Release Status:"
+                  helm status $(helmReleaseName) -n ${{ parameters.namespace }}
+                addSpnToEnvironment: true
+
+            - task: AzureCLI@2
+              displayName: 'Verify Deployment'
+              inputs:
+                azureSubscription: $(serviceConnection)
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  echo "🔍 Verifying deployment..."
+                  echo ""
+                  
+                  echo "📦 Pods:"
+                  kubectl get pods -n ${{ parameters.namespace }} -l app.kubernetes.io/instance=$(helmReleaseName)
+                  echo ""
+                  
+                  echo "🌐 Services:"
+                  kubectl get svc -n ${{ parameters.namespace }} -l app.kubernetes.io/instance=$(helmReleaseName)
+                  echo ""
+                  
+                  echo "🔗 Ingress:"
+                  kubectl get ingress -n ${{ parameters.namespace }} -l app.kubernetes.io/instance=$(helmReleaseName) 2>/dev/null || echo "  No ingress resources"
+                  echo ""
+                  
+                  echo "📊 Resource Summary:"
+                  kubectl get all -n ${{ parameters.namespace }} -l app.kubernetes.io/instance=$(helmReleaseName)
+                addSpnToEnvironment: true
+
+          # Uninstall
+          - ${{ if eq(parameters.action, 'uninstall') }}:
+            - task: AzureCLI@2
+              displayName: 'Helm Uninstall'
+              inputs:
+                azureSubscription: $(serviceConnection)
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  echo "🗑️ Uninstalling $(helmReleaseName) from namespace ${{ parameters.namespace }}..."
+                  
+                  if helm status $(helmReleaseName) -n ${{ parameters.namespace }} &>/dev/null; then
+                    helm uninstall $(helmReleaseName) -n ${{ parameters.namespace }} --wait
+                    echo "✅ Release $(helmReleaseName) uninstalled successfully"
+                  else
+                    echo "⚠️  Release $(helmReleaseName) not found in namespace ${{ parameters.namespace }}"
+                  fi
+                addSpnToEnvironment: true

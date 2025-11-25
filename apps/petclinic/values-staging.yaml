@@ -1,0 +1,41 @@
+# Staging environment overrides
+# Inherits from values.yaml
+
+replicaCount: 2
+
+resources:
+  requests:
+    memory: "512Mi"
+    cpu: "250m"
+  limits:
+    memory: "1Gi"
+    cpu: "1000m"
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+env:
+  - name: JAVA_OPTS
+    value: "-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0"
+  - name: SPRING_PROFILES_ACTIVE
+    value: "kubernetes,staging"
+  - name: LOGGING_LEVEL_ROOT
+    value: "INFO"
+
+ingress:
+  enabled: true
+  className: ""
+  annotations:
+    kubernetes.io/ingress.class: nginx
+  hosts:
+    - host: petclinic-staging.local
+      paths:
+        - path: /
+          pathType: Prefix

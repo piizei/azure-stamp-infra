@@ -1,0 +1,140 @@
+# Default values for Spring PetClinic
+# This is a YAML-formatted file.
+
+# Application configuration
+replicaCount: 2
+
+image:
+  repository: springcommunity/spring-framework-petclinic
+  pullPolicy: IfNotPresent
+  tag: "6.1.2"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Service Account for workload identity
+serviceAccount:
+  create: true
+  annotations: {}
+  # azure.workload.identity/client-id: "<client-id>"
+  name: ""
+
+# Pod annotations for workload identity
+podAnnotations: {}
+  # azure.workload.identity/use: "true"
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+# Ingress configuration
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: petclinic.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Resource configuration - optimized for JVM workloads
+resources:
+  requests:
+    memory: "512Mi"
+    cpu: "250m"
+  limits:
+    memory: "1Gi"
+    cpu: "1000m"
+
+# Autoscaling
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+# Pod disruption budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity - prefer spreading across zones
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - petclinic
+          topologyKey: topology.kubernetes.io/zone
+
+# Health checks
+livenessProbe:
+  httpGet:
+    path: /actuator/health/liveness
+    port: http
+  initialDelaySeconds: 60
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /actuator/health/readiness
+    port: http
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# Environment variables
+env:
+  - name: JAVA_OPTS
+    value: "-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0"
+  - name: SPRING_PROFILES_ACTIVE
+    value: "kubernetes"
+
+# Additional environment variables from ConfigMap or Secret
+envFrom: []
+
+# Database configuration (using in-memory H2 by default)
+database:
+  type: h2  # h2, mysql, postgresql
+  # For external database, configure these:
+  # host: ""
+  # port: 3306
+  # name: petclinic
+  # username: ""
+  # passwordSecretName: ""
+  # passwordSecretKey: ""

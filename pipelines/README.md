@@ -134,6 +134,14 @@ Create an environment for each stamp you plan to deploy. The environment name mu
 2. Select `/pipelines/destroy-stamp.yml`
 3. Save
 
+### Deploy App Pipeline
+
+1. New Pipeline → Select repo → Existing YAML
+2. Select `/pipelines/deploy-app.yml`
+3. Save
+
+This pipeline deploys applications to AKS clusters using Helm.
+
 ---
 
 ## 5. Initial Setup (Bootstrap)
@@ -184,6 +192,16 @@ The pipeline will:
 | `stampId` | Which stamp to destroy | `swc-dev` |
 | `layers` | Layers to destroy (reverse order) | All |
 | `confirmDestroy` | Type stamp ID to confirm | Empty |
+
+### deploy-app.yml
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `stamp` | Target stamp (determines AKS cluster) | `swc-dev` |
+| `application` | Application to deploy | `petclinic` |
+| `namespace` | Kubernetes namespace | `default` |
+| `releaseName` | Helm release name | App name |
+| `action` | deploy/uninstall/dry-run | `deploy` |
 
 ---
 
