@@ -78,25 +78,30 @@ Override values for production stamps.
 
 Go to Pipelines → Environments
 
-### Development Environment
-- **Name:** `dev`
-- **Approvals:** None (auto-deploy)
+Create an environment for each stamp you plan to deploy. The environment name must match the stamp ID.
 
-### Staging Environment
-- **Name:** `staging`
-- **Approvals:** Add approvers (optional)
+### Required Environments
 
-### Production Environment
-- **Name:** `prod`
-- **Approvals:** Required - add leads/managers
-- **Checks:** 
-  - Business hours only (optional)
-  - Minimum wait time (optional)
+| Environment Name | Description | Approvals |
+|------------------|-------------|-----------|
+| `swc-dev` | Sweden Central Development | None (auto-deploy) |
+| `swc-staging` | Sweden Central Staging | Optional |
+| `swc-prod` | Sweden Central Production | Required |
+| `neu-dev` | North Europe Development | None |
+| `neu-prod` | North Europe Production | Required |
 
-### Destroy Approval
-- **Name:** `destroy-approval`
-- **Approvals:** Required - add senior team members
-- **Description:** Protects against accidental destruction
+**To create an environment:**
+1. Go to Pipelines → Environments
+2. Click **New environment**
+3. Name: `swc-dev` (must match stamp ID exactly)
+4. Resource: None
+5. Click **Create**
+
+**Adding approvals (for production):**
+1. Open the environment (e.g., `swc-prod`)
+2. Click ⋮ → Approvals and checks
+3. Add **Approvals** → Select approvers
+4. Optionally add **Business hours** or **Required template** checks
 
 ---
 
@@ -212,6 +217,9 @@ The pipeline will:
 ---
 
 ## Troubleshooting
+
+### "Environment could not be found"
+Create the environment in Pipelines → Environments with the exact stamp name (e.g., `swc-dev`).
 
 ### "Backend not initialized"
 Run the bootstrap pipeline first.
