@@ -74,10 +74,9 @@ stages:
               steps:
                 - checkout: self
 
-                - task: TerraformInstaller@1
-                  displayName: 'Install Terraform'
-                  inputs:
-                    terraformVersion: 'latest'
+                - template: templates/install-terraform.yml
+                  parameters:
+                    version: '1.13.5'
 
                 - task: AzureCLI@2
                   displayName: 'Destroy Layers'

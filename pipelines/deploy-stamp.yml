@@ -110,10 +110,9 @@ stages:
         steps:
           - checkout: self
 
-          - task: TerraformInstaller@1
-            displayName: 'Install Terraform'
-            inputs:
-              terraformVersion: 'latest'
+          - template: templates/install-terraform.yml
+            parameters:
+              version: '1.13.5'
 
           - task: AzureCLI@2
             displayName: 'Compute Backend Config'
@@ -278,10 +277,9 @@ stages:
               steps:
                 - checkout: self
 
-                - task: TerraformInstaller@1
-                  displayName: 'Install Terraform'
-                  inputs:
-                    terraformVersion: 'latest'
+                - template: templates/install-terraform.yml
+                  parameters:
+                    version: '1.13.5'
 
                 - task: DownloadPipelineArtifact@2
                   displayName: 'Download Plan Artifacts'
@@ -422,10 +420,9 @@ stages:
                 steps:
                   - checkout: self
 
-                  - task: TerraformInstaller@1
-                    displayName: 'Install Terraform'
-                    inputs:
-                      terraformVersion: 'latest'
+                  - template: templates/install-terraform.yml
+                    parameters:
+                      version: '1.13.5'
 
                   - task: AzureCLI@2
                     displayName: 'Compute Backend Config'

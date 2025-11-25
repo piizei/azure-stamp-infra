@@ -38,10 +38,9 @@ jobs:
     steps:
       - checkout: self
 
-      - task: TerraformInstaller@1
-        displayName: 'Install Terraform'
-        inputs:
-          terraformVersion: 'latest'
+      - template: install-terraform.yml
+        parameters:
+          version: '1.13.5'
 
       - template: terraform-init.yml
         parameters:

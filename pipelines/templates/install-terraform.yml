@@ -1,0 +1,35 @@
+# Template: Install Terraform
+# Installs Terraform without using the TerraformInstaller task
+
+parameters:
+  - name: version
+    type: string
+    default: '1.13.5'  # Pin to a specific version for reproducibility
+
+steps:
+  - script: |
+      set -e
+      
+      TERRAFORM_VERSION="${{ parameters.version }}"
+      
+      # Check if terraform is already installed with correct version
+      if command -v terraform &> /dev/null; then
+        INSTALLED_VERSION=$(terraform version -json | jq -r '.terraform_version')
+        if [ "$INSTALLED_VERSION" = "$TERRAFORM_VERSION" ]; then
+          echo "✅ Terraform $TERRAFORM_VERSION already installed"
+          exit 0
+        fi
+      fi
+      
+      echo "📦 Installing Terraform $TERRAFORM_VERSION..."
+      
+      # Download and install
+      wget -q "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" -O /tmp/terraform.zip
+      unzip -o /tmp/terraform.zip -d /tmp
+      sudo mv /tmp/terraform /usr/local/bin/
+      rm /tmp/terraform.zip
+      
+      # Verify installation
+      terraform version
+      echo "✅ Terraform installed successfully"
+    displayName: 'Install Terraform ${{ parameters.version }}'

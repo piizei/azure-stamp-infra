@@ -31,8 +31,6 @@ variables:
   - group: stamp-common
   - name: serviceConnection
     value: 'azure-infra-dev'
-  - name: terraformVersion
-    value: 'latest'
 
 stages:
   - stage: Validate
@@ -45,10 +43,9 @@ stages:
         steps:
           - checkout: self
 
-          - task: TerraformInstaller@1
-            displayName: 'Install Terraform'
-            inputs:
-              terraformVersion: $(terraformVersion)
+          - template: templates/install-terraform.yml
+            parameters:
+              version: '1.13.5'
 
           - script: |
               echo "🔍 Checking Terraform formatting..."
@@ -113,10 +110,9 @@ stages:
         steps:
           - checkout: self
 
-          - task: TerraformInstaller@1
-            displayName: 'Install Terraform'
-            inputs:
-              terraformVersion: $(terraformVersion)
+          - template: templates/install-terraform.yml
+            parameters:
+              version: '1.13.5'
 
           - task: AzureCLI@2
             displayName: 'Plan All Layers'
