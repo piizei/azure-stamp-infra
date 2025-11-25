@@ -59,16 +59,17 @@ parameters:
     default: false
 
 variables:
-  # Variable group with subscription ID and common settings
+  # Variable group with subscription ID and common settings (required)
   - group: stamp-common
   
-  # Conditional variable groups based on environment
-  - ${{ if contains(parameters.stamp, '-dev') }}:
-    - group: stamp-dev
-  - ${{ if contains(parameters.stamp, '-staging') }}:
-    - group: stamp-staging
-  - ${{ if contains(parameters.stamp, '-prod') }}:
-    - group: stamp-prod
+  # Optional: Environment-specific variable groups
+  # Uncomment these if you have separate variable groups per environment:
+  # - ${{ if contains(parameters.stamp, '-dev') }}:
+  #   - group: stamp-dev
+  # - ${{ if contains(parameters.stamp, '-staging') }}:
+  #   - group: stamp-staging
+  # - ${{ if contains(parameters.stamp, '-prod') }}:
+  #   - group: stamp-prod
 
   # Derived variables
   - name: stampId
