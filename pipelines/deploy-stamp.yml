@@ -2,12 +2,18 @@
 #
 # This pipeline deploys infrastructure layers for a selected stamp.
 # Prerequisites:
-#   1. Bootstrap has been run locally (./scripts/stamp bootstrap)
+#   1. Bootstrap has been run (./scripts/stamp bootstrap)
 #   2. Variable groups configured in ADO Library:
-#      - stamp-common: Common variables (SUBSCRIPTION_ID)
+#      - stamp-common: SUBSCRIPTION_ID (stamp resources)
+#                      BOOTSTRAP_SUBSCRIPTION_ID (state backend, optional - defaults to SUBSCRIPTION_ID)
 #      - stamp-dev: Dev-specific overrides (optional)
 #      - stamp-prod: Prod-specific overrides (optional)
 #   3. Service connection with Contributor + RBAC Admin on subscription
+#
+# Multi-Subscription Support:
+#   - SUBSCRIPTION_ID: Where stamp resources are deployed
+#   - BOOTSTRAP_SUBSCRIPTION_ID: Where Terraform state backend lives
+#   - If both are the same, only set SUBSCRIPTION_ID
 #
 # Usage:
 #   - Select stamp from dropdown
@@ -100,24 +106,33 @@ stages:
               terraformVersion: 'latest'
 
           - task: AzureCLI@2
-            displayName: 'Get Bootstrap Backend Config'
+            displayName: 'Compute Backend Config'
             inputs:
               azureSubscription: $(serviceConnection)
               scriptType: 'bash'
               scriptLocation: 'inlineScript'
               inlineScript: |
-                cd terraform/layers/00-bootstrap
-                terraform init -input=false
+                # Use bootstrap subscription if set, otherwise fall back to stamp subscription
+                BOOTSTRAP_SUB="${BOOTSTRAP_SUBSCRIPTION_ID:-$SUBSCRIPTION_ID}"
                 
-                TFSTATE_RG=$(terraform output -raw resource_group_name)
-                TFSTATE_SA=$(terraform output -raw storage_account_name)
-                TFSTATE_CONTAINER=$(terraform output -raw container_name)
+                # Compute backend storage account name using same logic as stamp module
+                ENTROPY="_bootstrap-${BOOTSTRAP_SUB,,}"
+                HASH=$(echo -n "$ENTROPY" | sha1sum | cut -c1-11)
+                
+                TFSTATE_RG="rg-bootstrap-tfstate"
+                TFSTATE_SA="st${HASH}tfstate"
+                TFSTATE_CONTAINER="tfstate"
                 
                 echo "##vso[task.setvariable variable=TFSTATE_RG;isOutput=true]${TFSTATE_RG}"
                 echo "##vso[task.setvariable variable=TFSTATE_SA;isOutput=true]${TFSTATE_SA}"
                 echo "##vso[task.setvariable variable=TFSTATE_CONTAINER;isOutput=true]${TFSTATE_CONTAINER}"
+                echo "##vso[task.setvariable variable=BOOTSTRAP_SUB;isOutput=true]${BOOTSTRAP_SUB}"
                 
-                echo "📦 Backend: ${TFSTATE_SA}/${TFSTATE_CONTAINER}"
+                echo "📦 Backend Config:"
+                echo "   Resource Group:  ${TFSTATE_RG}"
+                echo "   Storage Account: ${TFSTATE_SA}"
+                echo "   Container:       ${TFSTATE_CONTAINER}"
+                echo "   Bootstrap Sub:   ${BOOTSTRAP_SUB}"
               addSpnToEnvironment: true
             name: backend
 
@@ -142,6 +157,7 @@ stages:
                   terraform plan \
                     -var="subscription_id=$(SUBSCRIPTION_ID)" \
                     -var="stamp_id=$(stampId)" \
+                    -var="bootstrap_subscription_id=$(backend.BOOTSTRAP_SUB)" \
                     -out=tfplan-networking \
                     -input=false
                 addSpnToEnvironment: true
@@ -167,6 +183,7 @@ stages:
                   terraform plan \
                     -var="subscription_id=$(SUBSCRIPTION_ID)" \
                     -var="stamp_id=$(stampId)" \
+                    -var="bootstrap_subscription_id=$(backend.BOOTSTRAP_SUB)" \
                     -out=tfplan-shared \
                     -input=false
                 addSpnToEnvironment: true
@@ -192,6 +209,7 @@ stages:
                   terraform plan \
                     -var="subscription_id=$(SUBSCRIPTION_ID)" \
                     -var="stamp_id=$(stampId)" \
+                    -var="bootstrap_subscription_id=$(backend.BOOTSTRAP_SUB)" \
                     -out=tfplan-compute \
                     -input=false
                 addSpnToEnvironment: true
@@ -262,18 +280,20 @@ stages:
                     path: '$(System.DefaultWorkingDirectory)/terraform/layers'
 
                 - task: AzureCLI@2
-                  displayName: 'Get Bootstrap Backend Config'
+                  displayName: 'Compute Backend Config'
                   inputs:
                     azureSubscription: $(serviceConnection)
                     scriptType: 'bash'
                     scriptLocation: 'inlineScript'
                     inlineScript: |
-                      cd terraform/layers/00-bootstrap
-                      terraform init -input=false
+                      BOOTSTRAP_SUB="${BOOTSTRAP_SUBSCRIPTION_ID:-$SUBSCRIPTION_ID}"
+                      ENTROPY="_bootstrap-${BOOTSTRAP_SUB,,}"
+                      HASH=$(echo -n "$ENTROPY" | sha1sum | cut -c1-11)
                       
-                      echo "##vso[task.setvariable variable=TFSTATE_RG]$(terraform output -raw resource_group_name)"
-                      echo "##vso[task.setvariable variable=TFSTATE_SA]$(terraform output -raw storage_account_name)"
-                      echo "##vso[task.setvariable variable=TFSTATE_CONTAINER]$(terraform output -raw container_name)"
+                      echo "##vso[task.setvariable variable=TFSTATE_RG]rg-bootstrap-tfstate"
+                      echo "##vso[task.setvariable variable=TFSTATE_SA]st${HASH}tfstate"
+                      echo "##vso[task.setvariable variable=TFSTATE_CONTAINER]tfstate"
+                      echo "##vso[task.setvariable variable=BOOTSTRAP_SUB]${BOOTSTRAP_SUB}"
                     addSpnToEnvironment: true
 
                 # Apply Networking
@@ -398,18 +418,20 @@ stages:
                       terraformVersion: 'latest'
 
                   - task: AzureCLI@2
-                    displayName: 'Get Bootstrap Backend Config'
+                    displayName: 'Compute Backend Config'
                     inputs:
                       azureSubscription: $(serviceConnection)
                       scriptType: 'bash'
                       scriptLocation: 'inlineScript'
                       inlineScript: |
-                        cd terraform/layers/00-bootstrap
-                        terraform init -input=false
+                        BOOTSTRAP_SUB="${BOOTSTRAP_SUBSCRIPTION_ID:-$SUBSCRIPTION_ID}"
+                        ENTROPY="_bootstrap-${BOOTSTRAP_SUB,,}"
+                        HASH=$(echo -n "$ENTROPY" | sha1sum | cut -c1-11)
                         
-                        echo "##vso[task.setvariable variable=TFSTATE_RG]$(terraform output -raw resource_group_name)"
-                        echo "##vso[task.setvariable variable=TFSTATE_SA]$(terraform output -raw storage_account_name)"
-                        echo "##vso[task.setvariable variable=TFSTATE_CONTAINER]$(terraform output -raw container_name)"
+                        echo "##vso[task.setvariable variable=TFSTATE_RG]rg-bootstrap-tfstate"
+                        echo "##vso[task.setvariable variable=TFSTATE_SA]st${HASH}tfstate"
+                        echo "##vso[task.setvariable variable=TFSTATE_CONTAINER]tfstate"
+                        echo "##vso[task.setvariable variable=BOOTSTRAP_SUB]${BOOTSTRAP_SUB}"
                       addSpnToEnvironment: true
 
                   # Destroy in reverse order: compute -> shared -> networking
@@ -432,7 +454,8 @@ stages:
                           
                           terraform destroy -auto-approve -input=false \
                             -var="subscription_id=$(SUBSCRIPTION_ID)" \
-                            -var="stamp_id=$(stampId)"
+                            -var="stamp_id=$(stampId)" \
+                            -var="bootstrap_subscription_id=$(BOOTSTRAP_SUB)"
                         addSpnToEnvironment: true
 
                   - ${{ if eq(variables.deployShared, true) }}:
@@ -454,7 +477,8 @@ stages:
                           
                           terraform destroy -auto-approve -input=false \
                             -var="subscription_id=$(SUBSCRIPTION_ID)" \
-                            -var="stamp_id=$(stampId)"
+                            -var="stamp_id=$(stampId)" \
+                            -var="bootstrap_subscription_id=$(BOOTSTRAP_SUB)"
                         addSpnToEnvironment: true
 
                   - ${{ if eq(variables.deployNetworking, true) }}:
@@ -476,5 +500,6 @@ stages:
                           
                           terraform destroy -auto-approve -input=false \
                             -var="subscription_id=$(SUBSCRIPTION_ID)" \
-                            -var="stamp_id=$(stampId)"
+                            -var="stamp_id=$(stampId)" \
+                            -var="bootstrap_subscription_id=$(BOOTSTRAP_SUB)"
                         addSpnToEnvironment: true

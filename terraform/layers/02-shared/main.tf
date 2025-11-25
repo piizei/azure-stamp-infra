@@ -1,7 +1,8 @@
 module "stamp" {
-  source          = "../../modules/stamp"
-  stamp_id        = var.stamp_id
-  subscription_id = var.subscription_id
+  source                    = "../../modules/stamp"
+  stamp_id                  = var.stamp_id
+  subscription_id           = var.subscription_id
+  bootstrap_subscription_id = var.bootstrap_subscription_id
 }
 
 data "terraform_remote_state" "networking" {

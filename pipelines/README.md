@@ -45,9 +45,14 @@ Go to Pipelines → Library → Variable Groups
 ### stamp-common
 Shared variables for all stamps.
 
-| Variable | Value | Secret |
-|----------|-------|--------|
-| `SUBSCRIPTION_ID` | `your-subscription-id` | No |
+| Variable | Value | Secret | Description |
+|----------|-------|--------|-------------|
+| `SUBSCRIPTION_ID` | `your-subscription-id` | No | Where stamp resources are deployed |
+| `BOOTSTRAP_SUBSCRIPTION_ID` | `your-bootstrap-sub-id` | No | Where Terraform state backend lives (optional, defaults to SUBSCRIPTION_ID) |
+
+**Multi-Subscription Deployments:**
+- If all stamps and state are in the same subscription, only set `SUBSCRIPTION_ID`
+- If state backend is in a different subscription (e.g., shared infra sub), also set `BOOTSTRAP_SUBSCRIPTION_ID`
 
 ### stamp-dev (optional)
 Override values for development stamps.

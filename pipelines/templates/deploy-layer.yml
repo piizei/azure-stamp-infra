@@ -1,5 +1,15 @@
 # Template: Deploy a single layer
 # Combines init, plan, and apply for one layer
+#
+# This template:
+# 1. Computes the backend config from bootstrap_subscription_id (matching stamp module logic)
+# 2. Initializes Terraform with remote state from Azure Storage
+# 3. Plans changes using existing state (idempotent)
+# 4. Applies changes
+#
+# For multi-subscription deployments:
+# - subscriptionId: where stamp resources are deployed
+# - bootstrapSubscriptionId: where Terraform state backend lives (defaults to subscriptionId)
 
 parameters:
   - name: layer
@@ -10,6 +20,9 @@ parameters:
     type: string
   - name: subscriptionId
     type: string
+  - name: bootstrapSubscriptionId
+    type: string
+    default: ''
   - name: serviceConnection
     type: string
   - name: dependsOn
@@ -36,6 +49,8 @@ jobs:
           stampId: ${{ parameters.stampId }}
           layer: ${{ parameters.layer }}
           serviceConnection: ${{ parameters.serviceConnection }}
+          subscriptionId: ${{ parameters.subscriptionId }}
+          bootstrapSubscriptionId: ${{ parameters.bootstrapSubscriptionId }}
 
       - task: AzureCLI@2
         displayName: 'Terraform Plan & Apply - ${{ parameters.layer }}'
@@ -44,15 +59,33 @@ jobs:
           scriptType: 'bash'
           scriptLocation: 'inlineScript'
           inlineScript: |
-            echo "Planning ${{ parameters.layer }} for stamp ${{ parameters.stampId }}..."
+            set -e
+            
+            # Determine bootstrap subscription (for passing to stamp module)
+            BOOTSTRAP_SUB="${{ parameters.bootstrapSubscriptionId }}"
+            if [ -z "$BOOTSTRAP_SUB" ]; then
+              BOOTSTRAP_SUB="${{ parameters.subscriptionId }}"
+            fi
+            
+            echo "═══════════════════════════════════════════════════════"
+            echo "📋 Planning ${{ parameters.layer }} for stamp ${{ parameters.stampId }}"
+            echo "═══════════════════════════════════════════════════════"
             
             terraform plan \
               -var="subscription_id=${{ parameters.subscriptionId }}" \
               -var="stamp_id=${{ parameters.stampId }}" \
+              -var="bootstrap_subscription_id=${BOOTSTRAP_SUB}" \
               -out=tfplan \
               -input=false
             
-            echo "Applying ${{ parameters.layer }}..."
+            echo ""
+            echo "═══════════════════════════════════════════════════════"
+            echo "🚀 Applying ${{ parameters.layer }}"
+            echo "═══════════════════════════════════════════════════════"
+            
             terraform apply -auto-approve -input=false tfplan
+            
+            echo ""
+            echo "✅ ${{ parameters.layer }} deployed successfully"
           addSpnToEnvironment: true
           workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/layers/${{ parameters.layerFolder }}'

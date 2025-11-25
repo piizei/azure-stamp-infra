@@ -132,9 +132,14 @@ locals {
   stamp_config        = try(local.stamp_catalog[local.normalized_stamp_id], null)
   resolved_config     = local.stamp_config != null ? local.stamp_config : error("Stamp '${var.stamp_id}' is not defined. Update terraform/modules/stamp to add it before deploying.")
 
+  # Subscription for stamp resources (AKS, networking, etc.)
   subscription_salt = trimspace(lower(var.subscription_id))
   entropy_source    = local.subscription_salt != "" ? "${local.normalized_stamp_id}-${local.subscription_salt}" : local.normalized_stamp_id
   hash_suffix       = substr(sha1(local.entropy_source), 0, 12)
+
+  # Subscription for bootstrap/state backend (may differ in multi-subscription scenarios)
+  bootstrap_subscription    = coalesce(var.bootstrap_subscription_id, var.subscription_id)
+  bootstrap_subscription_salt = trimspace(lower(local.bootstrap_subscription))
 
   sanitized_alnum      = replace(replace(replace(local.normalized_stamp_id, "-", ""), "_", ""), " ", "")
   sanitized_alnum_safe = local.sanitized_alnum != "" ? local.sanitized_alnum : substr(md5(local.normalized_stamp_id), 0, 12)
@@ -145,8 +150,9 @@ locals {
 
   # Bootstrap naming - consistent across all stamps
   # When any stamp needs to reference the shared backend, use these values
+  # Uses bootstrap_subscription_id for the hash (supports multi-subscription deployments)
   is_bootstrap           = local.normalized_stamp_id == "_bootstrap"
-  bootstrap_entropy      = local.subscription_salt != "" ? "_bootstrap-${local.subscription_salt}" : "_bootstrap"
+  bootstrap_entropy      = local.bootstrap_subscription_salt != "" ? "_bootstrap-${local.bootstrap_subscription_salt}" : "_bootstrap"
   bootstrap_hash         = substr(sha1(local.bootstrap_entropy), 0, 11)
   bootstrap_rg_name      = "rg-bootstrap-tfstate"
   bootstrap_storage_name = "st${local.bootstrap_hash}tfstate"

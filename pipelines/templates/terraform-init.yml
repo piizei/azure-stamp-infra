@@ -1,5 +1,14 @@
 # Template: Initialize Terraform with shared backend
 # Assumes bootstrap has been applied and remote state exists
+#
+# Backend config is computed using the same logic as the stamp module:
+# - Resource group: rg-bootstrap-tfstate
+# - Storage account: st<hash>tfstate where hash = sha1("_bootstrap-<bootstrap_subscription_id>")[0:11]
+# - Container: tfstate
+# - Key: <stamp_id>/<layer>.tfstate
+#
+# For multi-subscription deployments, bootstrapSubscriptionId specifies where
+# the state backend lives (defaults to subscriptionId if not provided).
 
 parameters:
   - name: workingDirectory
@@ -10,32 +19,48 @@ parameters:
     type: string
   - name: serviceConnection
     type: string
+  - name: subscriptionId
+    type: string
+    default: '$(SUBSCRIPTION_ID)'
+  - name: bootstrapSubscriptionId
+    type: string
+    default: ''  # Defaults to subscriptionId if empty
 
 steps:
   - task: AzureCLI@2
-    displayName: 'Get Bootstrap Backend Config'
+    displayName: 'Compute Backend Config'
     inputs:
       azureSubscription: ${{ parameters.serviceConnection }}
       scriptType: 'bash'
       scriptLocation: 'inlineScript'
       inlineScript: |
-        # Get backend config from bootstrap outputs
-        cd terraform/layers/00-bootstrap
+        set -e
         
-        # Initialize bootstrap to read outputs (local state)
-        terraform init -input=false
+        # Use bootstrap subscription if provided, otherwise fall back to stamp subscription
+        BOOTSTRAP_SUB="${{ parameters.bootstrapSubscriptionId }}"
+        if [ -z "$BOOTSTRAP_SUB" ]; then
+          BOOTSTRAP_SUB="${{ parameters.subscriptionId }}"
+        fi
         
-        TFSTATE_RG=$(terraform output -raw resource_group_name)
-        TFSTATE_SA=$(terraform output -raw storage_account_name)
-        TFSTATE_CONTAINER=$(terraform output -raw container_name)
+        # Compute backend storage account name using same logic as stamp module
+        # This mirrors: bootstrap_hash = substr(sha1("_bootstrap-${bootstrap_subscription_id}"), 0, 11)
+        ENTROPY="_bootstrap-${BOOTSTRAP_SUB,,}"  # lowercase
+        HASH=$(echo -n "$ENTROPY" | sha1sum | cut -c1-11)
+        
+        TFSTATE_RG="rg-bootstrap-tfstate"
+        TFSTATE_SA="st${HASH}tfstate"
+        TFSTATE_CONTAINER="tfstate"
         
         echo "##vso[task.setvariable variable=TFSTATE_RG]${TFSTATE_RG}"
         echo "##vso[task.setvariable variable=TFSTATE_SA]${TFSTATE_SA}"
         echo "##vso[task.setvariable variable=TFSTATE_CONTAINER]${TFSTATE_CONTAINER}"
         
-        echo "Backend: ${TFSTATE_SA}/${TFSTATE_CONTAINER}"
+        echo "Backend Config:"
+        echo "  Resource Group:   ${TFSTATE_RG}"
+        echo "  Storage Account:  ${TFSTATE_SA}"
+        echo "  Container:        ${TFSTATE_CONTAINER}"
+        echo "  Bootstrap Sub:    ${BOOTSTRAP_SUB}"
       addSpnToEnvironment: true
-      workingDirectory: $(System.DefaultWorkingDirectory)
 
   - task: AzureCLI@2
     displayName: 'Terraform Init - ${{ parameters.layer }}'
@@ -44,8 +69,17 @@ steps:
       scriptType: 'bash'
       scriptLocation: 'inlineScript'
       inlineScript: |
+        set -e
+        
         STATE_KEY="${{ parameters.stampId }}/${{ parameters.layer }}.tfstate"
-        echo "Initializing with state key: ${STATE_KEY}"
+        echo "State Key: ${STATE_KEY}"
+        
+        # Verify storage account exists
+        if ! az storage account show -n "$(TFSTATE_SA)" -g "$(TFSTATE_RG)" --query id -o tsv 2>/dev/null; then
+          echo "##[error]Backend storage account not found: $(TFSTATE_SA)"
+          echo "##[error]Run the bootstrap pipeline first to create the shared state backend."
+          exit 1
+        fi
         
         terraform init -input=false \
           -backend-config="resource_group_name=$(TFSTATE_RG)" \
@@ -53,5 +87,7 @@ steps:
           -backend-config="container_name=$(TFSTATE_CONTAINER)" \
           -backend-config="use_azuread_auth=true" \
           -backend-config="key=${STATE_KEY}"
+        
+        echo "✅ Initialized with remote state from Azure Storage"
       addSpnToEnvironment: true
       workingDirectory: ${{ parameters.workingDirectory }}
