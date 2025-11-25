@@ -1,0 +1,52 @@
+# Template: Terraform Plan
+# Runs terraform plan and publishes the plan as an artifact
+
+parameters:
+  - name: workingDirectory
+    type: string
+  - name: stampId
+    type: string
+  - name: subscriptionId
+    type: string
+  - name: serviceConnection
+    type: string
+  - name: artifactName
+    type: string
+    default: 'tfplan'
+
+steps:
+  - task: AzureCLI@2
+    displayName: 'Terraform Plan'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        terraform plan \
+          -var="subscription_id=${{ parameters.subscriptionId }}" \
+          -var="stamp_id=${{ parameters.stampId }}" \
+          -out=tfplan \
+          -input=false \
+          -detailed-exitcode || exit_code=$?
+        
+        # Exit codes: 0 = no changes, 1 = error, 2 = changes present
+        if [ "${exit_code}" = "1" ]; then
+          echo "##vso[task.logissue type=error]Terraform plan failed"
+          exit 1
+        elif [ "${exit_code}" = "2" ]; then
+          echo "##vso[task.setvariable variable=PLAN_HAS_CHANGES;isOutput=true]true"
+          echo "Changes detected in plan"
+        else
+          echo "##vso[task.setvariable variable=PLAN_HAS_CHANGES;isOutput=true]false"
+          echo "No changes detected"
+        fi
+      addSpnToEnvironment: true
+      workingDirectory: ${{ parameters.workingDirectory }}
+    name: plan
+
+  - task: PublishPipelineArtifact@1
+    displayName: 'Publish Plan Artifact'
+    inputs:
+      targetPath: '${{ parameters.workingDirectory }}/tfplan'
+      artifact: '${{ parameters.artifactName }}'
+    condition: always()

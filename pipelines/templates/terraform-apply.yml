@@ -1,0 +1,29 @@
+# Template: Terraform Apply
+# Downloads plan artifact and applies it
+
+parameters:
+  - name: workingDirectory
+    type: string
+  - name: serviceConnection
+    type: string
+  - name: artifactName
+    type: string
+    default: 'tfplan'
+
+steps:
+  - task: DownloadPipelineArtifact@2
+    displayName: 'Download Plan Artifact'
+    inputs:
+      artifact: '${{ parameters.artifactName }}'
+      path: '${{ parameters.workingDirectory }}'
+
+  - task: AzureCLI@2
+    displayName: 'Terraform Apply'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        terraform apply -auto-approve -input=false tfplan
+      addSpnToEnvironment: true
+      workingDirectory: ${{ parameters.workingDirectory }}

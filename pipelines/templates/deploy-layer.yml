@@ -1,0 +1,58 @@
+# Template: Deploy a single layer
+# Combines init, plan, and apply for one layer
+
+parameters:
+  - name: layer
+    type: string
+  - name: layerFolder
+    type: string
+  - name: stampId
+    type: string
+  - name: subscriptionId
+    type: string
+  - name: serviceConnection
+    type: string
+  - name: dependsOn
+    type: object
+    default: []
+
+jobs:
+  - job: Deploy_${{ replace(parameters.layer, '-', '_') }}
+    displayName: 'Deploy ${{ parameters.layer }}'
+    dependsOn: ${{ parameters.dependsOn }}
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+      - checkout: self
+
+      - task: TerraformInstaller@1
+        displayName: 'Install Terraform'
+        inputs:
+          terraformVersion: 'latest'
+
+      - template: terraform-init.yml
+        parameters:
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/layers/${{ parameters.layerFolder }}'
+          stampId: ${{ parameters.stampId }}
+          layer: ${{ parameters.layer }}
+          serviceConnection: ${{ parameters.serviceConnection }}
+
+      - task: AzureCLI@2
+        displayName: 'Terraform Plan & Apply - ${{ parameters.layer }}'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          inlineScript: |
+            echo "Planning ${{ parameters.layer }} for stamp ${{ parameters.stampId }}..."
+            
+            terraform plan \
+              -var="subscription_id=${{ parameters.subscriptionId }}" \
+              -var="stamp_id=${{ parameters.stampId }}" \
+              -out=tfplan \
+              -input=false
+            
+            echo "Applying ${{ parameters.layer }}..."
+            terraform apply -auto-approve -input=false tfplan
+          addSpnToEnvironment: true
+          workingDirectory: '$(System.DefaultWorkingDirectory)/terraform/layers/${{ parameters.layerFolder }}'

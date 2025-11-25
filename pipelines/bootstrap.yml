@@ -1,0 +1,119 @@
+# Azure DevOps Pipeline: Bootstrap Terraform Backend
+#
+# This pipeline creates the shared Terraform state backend.
+# Run this ONCE per subscription before deploying any stamps.
+#
+# Prerequisites:
+#   1. Service connection with Contributor + Storage Blob Data Contributor
+#   2. Variable group 'stamp-common' with SUBSCRIPTION_ID
+
+trigger: none
+pr: none
+
+parameters:
+  - name: confirm
+    displayName: 'Confirm Bootstrap Creation'
+    type: boolean
+    default: false
+
+variables:
+  - group: stamp-common
+  - name: serviceConnection
+    value: 'azure-infra-bootstrap'
+
+stages:
+  - stage: Bootstrap
+    displayName: 'Create Terraform Backend'
+    condition: eq('${{ parameters.confirm }}', true)
+    jobs:
+      - job: CreateBackend
+        displayName: 'Bootstrap State Backend'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: 'latest'
+
+          - task: AzureCLI@2
+            displayName: 'Terraform Init & Apply Bootstrap'
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                cd terraform/layers/00-bootstrap
+                
+                echo "🚀 Initializing bootstrap layer..."
+                terraform init -input=false
+                
+                echo "📋 Planning bootstrap..."
+                terraform plan \
+                  -var="subscription_id=$(SUBSCRIPTION_ID)" \
+                  -var="stamp_id=_bootstrap" \
+                  -out=tfplan \
+                  -input=false
+                
+                echo "✅ Applying bootstrap..."
+                terraform apply -auto-approve -input=false tfplan
+                
+                echo ""
+                echo "═══════════════════════════════════════════════════════"
+                echo "Bootstrap Complete!"
+                echo "═══════════════════════════════════════════════════════"
+                echo "Resource Group:    $(terraform output -raw resource_group_name)"
+                echo "Storage Account:   $(terraform output -raw storage_account_name)"
+                echo "Container:         $(terraform output -raw container_name)"
+                echo ""
+                echo "You can now deploy stamps using the deploy-stamp pipeline."
+              addSpnToEnvironment: true
+
+          # Commit the local state to repo (optional but useful)
+          - task: AzureCLI@2
+            displayName: 'Commit Bootstrap State'
+            condition: succeeded()
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                cd terraform/layers/00-bootstrap
+                
+                # Configure git
+                git config user.email "pipeline@azure.com"
+                git config user.name "Azure Pipeline"
+                
+                # Check if state file changed
+                if git diff --quiet terraform.tfstate 2>/dev/null; then
+                  echo "No changes to commit"
+                else
+                  git add terraform.tfstate terraform.tfstate.backup 2>/dev/null || true
+                  git commit -m "chore: update bootstrap terraform state [skip ci]" || true
+                  git push origin HEAD:$(Build.SourceBranchName) || echo "Could not push (may need permissions)"
+                fi
+              addSpnToEnvironment: true
+            continueOnError: true
+
+  - stage: NotConfirmed
+    displayName: 'Bootstrap Not Confirmed'
+    condition: eq('${{ parameters.confirm }}', false)
+    jobs:
+      - job: ShowInstructions
+        displayName: 'Instructions'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - script: |
+              echo "═══════════════════════════════════════════════════════"
+              echo "Bootstrap was NOT created"
+              echo "═══════════════════════════════════════════════════════"
+              echo ""
+              echo "To create the Terraform backend:"
+              echo "1. Run this pipeline again"
+              echo "2. Check the 'Confirm Bootstrap Creation' checkbox"
+              echo ""
+              echo "This only needs to be done ONCE per subscription."
+            displayName: 'Show Instructions'

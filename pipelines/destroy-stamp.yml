@@ -1,0 +1,147 @@
+# Azure DevOps Pipeline: Destroy Stamp
+#
+# Destroys a stamp's infrastructure.
+# Use with caution - this is destructive!
+
+trigger: none
+pr: none
+
+parameters:
+  - name: stampId
+    displayName: 'Stamp to destroy'
+    type: string
+    default: 'swc-dev'
+    values:
+      - swc-dev
+      - swc-staging
+      - swc-prod
+      - neu-dev
+      - neu-prod
+
+  - name: layers
+    displayName: 'Layers to destroy (reverse order)'
+    type: object
+    default:
+      - 04-compute
+      - 02-shared
+      - 01-networking
+
+  - name: confirmDestroy
+    displayName: 'Type the stamp ID to confirm destruction'
+    type: string
+    default: ''
+
+variables:
+  - group: stamp-common
+  - name: serviceConnection
+    value: 'azure-infra-dev'
+
+stages:
+  - stage: Validate
+    displayName: 'Validate Destruction'
+    jobs:
+      - job: CheckConfirmation
+        displayName: 'Verify Confirmation'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - script: |
+              if [ "${{ parameters.confirmDestroy }}" != "${{ parameters.stampId }}" ]; then
+                echo "❌ ERROR: Confirmation does not match stamp ID"
+                echo ""
+                echo "You entered: '${{ parameters.confirmDestroy }}'"
+                echo "Expected:    '${{ parameters.stampId }}'"
+                echo ""
+                echo "To destroy the stamp, enter the stamp ID in the confirmation field."
+                exit 1
+              fi
+              
+              echo "✅ Confirmation verified: destroying ${{ parameters.stampId }}"
+            displayName: 'Verify Confirmation'
+
+  - stage: Destroy
+    displayName: 'Destroy Stamp'
+    dependsOn: Validate
+    jobs:
+      - deployment: DestroyInfra
+        displayName: 'Destroy ${{ parameters.stampId }}'
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: 'destroy-approval'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: TerraformInstaller@1
+                  displayName: 'Install Terraform'
+                  inputs:
+                    terraformVersion: 'latest'
+
+                - task: AzureCLI@2
+                  displayName: 'Destroy Layers'
+                  inputs:
+                    azureSubscription: $(serviceConnection)
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      set -e
+                      
+                      STAMP_ID="${{ parameters.stampId }}"
+                      SUBSCRIPTION_ID=$(SUBSCRIPTION_ID)
+                      
+                      # Get backend config
+                      cd terraform/modules/stamp
+                      terraform init -input=false > /dev/null
+                      BACKEND=$(terraform output -json backend 2>/dev/null)
+                      cd ../../..
+                      
+                      BACKEND_RG=$(echo $BACKEND | jq -r ".resource_group_name")
+                      BACKEND_SA=$(echo $BACKEND | jq -r ".storage_account_name")
+                      BACKEND_CONTAINER=$(echo $BACKEND | jq -r ".container_name")
+                      
+                      # Convert layers parameter to array
+                      LAYERS="${{ join(',', parameters.layers) }}"
+                      
+                      echo "═══════════════════════════════════════════════════════"
+                      echo "🗑️  DESTROYING STAMP: $STAMP_ID"
+                      echo "═══════════════════════════════════════════════════════"
+                      echo "Layers to destroy: $LAYERS"
+                      echo ""
+                      
+                      IFS=',' read -ra LAYER_ARRAY <<< "$LAYERS"
+                      
+                      for layer in "${LAYER_ARRAY[@]}"; do
+                        layer=$(echo "$layer" | xargs)  # trim whitespace
+                        
+                        echo ""
+                        echo "═══════════════════════════════════════════════════════"
+                        echo "🗑️  Destroying: $layer"
+                        echo "═══════════════════════════════════════════════════════"
+                        
+                        cd terraform/layers/$layer
+                        
+                        terraform init \
+                          -backend-config="resource_group_name=$BACKEND_RG" \
+                          -backend-config="storage_account_name=$BACKEND_SA" \
+                          -backend-config="container_name=$BACKEND_CONTAINER" \
+                          -backend-config="key=$STAMP_ID/${layer#*-}.tfstate" \
+                          -input=false
+                        
+                        terraform destroy \
+                          -var="subscription_id=$SUBSCRIPTION_ID" \
+                          -var="stamp_id=$STAMP_ID" \
+                          -auto-approve \
+                          -input=false
+                        
+                        echo "✅ $layer destroyed"
+                        
+                        cd ../../..
+                      done
+                      
+                      echo ""
+                      echo "═══════════════════════════════════════════════════════"
+                      echo "✅ STAMP DESTROYED: $STAMP_ID"
+                      echo "═══════════════════════════════════════════════════════"
+                    addSpnToEnvironment: true

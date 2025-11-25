@@ -1,0 +1,49 @@
+{
+    "name": "Azure Stamp Infrastructure",
+    "image": "mcr.microsoft.com/devcontainers/python:3.10-bullseye",
+    "features": {
+        "ghcr.io/devcontainers/features/azure-cli:1": {},
+        "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+        "ghcr.io/devcontainers/features/terraform:1": {
+            "version": "latest",
+            "tflint": "latest"
+        },
+        "ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
+            "helm": "latest",
+            "kubectl": "latest",
+            "minikube": "none"
+        },
+        "ghcr.io/azure/azure-dev/azd:latest": {},
+        "ghcr.io/devcontainers/features/github-cli:1": {}
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "GitHub.vscode-github-actions",
+                "hashicorp.terraform",
+                "ms-azuretools.azure-dev",
+                "ms-azuretools.vscode-azurefunctions",
+                "ms-azuretools.vscode-docker",
+                "ms-kubernetes-tools.vscode-kubernetes-tools",
+                "redhat.vscode-yaml",
+                "timonwong.shellcheck"
+            ],
+            "settings": {
+                "terraform.languageServer.enable": true,
+                "terraform.codelens.referenceCount": true,
+                "[terraform]": {
+                    "editor.formatOnSave": true,
+                    "editor.defaultFormatter": "hashicorp.terraform"
+                },
+                "[shellscript]": {
+                    "editor.defaultFormatter": "foxundermoon.shell-format"
+                }
+            }
+        }
+    },
+    "postCreateCommand": "chmod +x scripts/* && cp .env.example .env 2>/dev/null || true && echo '✅ Run: ./scripts/stamp help'",
+    "remoteUser": "vscode",
+    "hostRequirements": {
+        "memory": "8gb"
+    }
+}

@@ -1,0 +1,961 @@
+#!/usr/bin/env bash
+#
+# stamp - Unified CLI for managing Azure stamp deployments
+#
+# Usage:
+#   ./scripts/stamp <command> [stamp_id] [options]
+#
+# Commands:
+#   list                    List all available stamps from the catalog
+#   bootstrap               Initialize the shared Terraform state backend (run once)
+#   init <stamp_id>         Initialize all layer backends for a stamp
+#   plan <stamp_id>         Plan layers without applying
+#   deploy <stamp_id>       Deploy layers in order
+#   deploy-all <stamp_id>   Bootstrap (if needed) + init + deploy
+#   destroy <stamp_id>      Destroy layers in reverse order
+#   status [stamp_id]       Show deployment status (all stamps if no ID given)
+#   validate                Validate Terraform configuration for all layers
+#   fmt                     Format all Terraform files
+#
+# Layer Selection:
+#   --layers <list>         Comma-separated layers to deploy (e.g., "networking,compute")
+#   --skip <list>           Comma-separated layers to skip (e.g., "shared,database")
+#
+# Layer Shortcuts:
+#   networking, net, 01     -> 01-networking
+#   shared, 02              -> 02-shared
+#   database, db, 03        -> 03-database
+#   compute, 04             -> 04-compute
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+LAYERS_DIR="$ROOT_DIR/terraform/layers"
+MODULES_DIR="$ROOT_DIR/terraform/modules"
+BOOTSTRAP_DIR="$LAYERS_DIR/00-bootstrap"
+
+# Bootstrap uses a special _bootstrap stamp ID
+BOOTSTRAP_STAMP_ID="_bootstrap"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+BOLD='\033[1m'
+
+# All available layers (excluding bootstrap)
+ALL_LAYERS=("01-networking" "02-shared" "03-database" "04-compute")
+
+# Default layers to deploy (excludes database by default)
+DEFAULT_LAYERS=("01-networking" "02-shared" "04-compute")
+
+# Active layers for current command (set by parse_layer_options)
+ACTIVE_LAYERS=()
+
+#------------------------------------------------------------------------------
+# Helper functions
+#------------------------------------------------------------------------------
+
+log_info() {
+  echo -e "${BLUE}ℹ${NC} $1"
+}
+
+log_success() {
+  echo -e "${GREEN}✓${NC} $1"
+}
+
+log_warn() {
+  echo -e "${YELLOW}⚠${NC} $1"
+}
+
+log_error() {
+  echo -e "${RED}✗${NC} $1" >&2
+}
+
+log_header() {
+  echo -e "\n${BOLD}${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+  echo -e "${BOLD}${CYAN}  $1${NC}"
+  echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════${NC}\n"
+}
+
+# Normalize layer name to full form
+normalize_layer() {
+  local layer="$1"
+  case "$layer" in
+    networking|net|01|01-networking)
+      echo "01-networking"
+      ;;
+    shared|02|02-shared)
+      echo "02-shared"
+      ;;
+    database|db|03|03-database)
+      echo "03-database"
+      ;;
+    compute|04|04-compute)
+      echo "04-compute"
+      ;;
+    *)
+      log_error "Unknown layer: $layer"
+      log_info "Valid layers: networking, shared, database, compute (or 01, 02, 03, 04)"
+      exit 1
+      ;;
+  esac
+}
+
+# Parse --layers and --skip options, set ACTIVE_LAYERS
+# Usage: parse_layer_options "$@" -> returns remaining args
+parse_layer_options() {
+  local layers_specified=""
+  local skip_layers=""
+  local remaining_args=()
+  local collecting_layers=""
+  local collecting_skip=""
+  
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --layers|--layer|-l)
+        collecting_layers="true"
+        collecting_skip=""
+        shift
+        ;;
+      --skip|-s)
+        collecting_skip="true"
+        collecting_layers=""
+        shift
+        ;;
+      --auto-approve|-y|--*)
+        # Stop collecting on next flag
+        collecting_layers=""
+        collecting_skip=""
+        remaining_args+=("$1")
+        shift
+        ;;
+      *)
+        if [[ -n "$collecting_layers" ]]; then
+          # Accumulate layer arguments (handle "networking, compute" as separate args)
+          layers_specified="${layers_specified}${layers_specified:+,}$1"
+        elif [[ -n "$collecting_skip" ]]; then
+          skip_layers="${skip_layers}${skip_layers:+,}$1"
+        else
+          remaining_args+=("$1")
+        fi
+        shift
+        ;;
+    esac
+  done
+  
+  # If --layers specified, use those
+  if [[ -n "$layers_specified" ]]; then
+    ACTIVE_LAYERS=()
+    # Split on comma and/or whitespace, filter empty
+    local layer
+    for layer in $(echo "$layers_specified" | tr ',' ' '); do
+      layer=$(echo "$layer" | xargs)  # trim whitespace
+      [[ -z "$layer" ]] && continue
+      ACTIVE_LAYERS+=("$(normalize_layer "$layer")")
+    done
+  else
+    # Start with default layers
+    ACTIVE_LAYERS=("${DEFAULT_LAYERS[@]}")
+  fi
+  
+  # Apply --skip if specified
+  if [[ -n "$skip_layers" ]]; then
+    local skip_normalized=()
+    local layer
+    for layer in $(echo "$skip_layers" | tr ',' ' '); do
+      layer=$(echo "$layer" | xargs)
+      [[ -z "$layer" ]] && continue
+      skip_normalized+=("$(normalize_layer "$layer")")
+    done
+    
+    # Filter out skipped layers
+    local filtered=()
+    for layer in "${ACTIVE_LAYERS[@]}"; do
+      local skip=false
+      for skip_layer in "${skip_normalized[@]}"; do
+        if [[ "$layer" == "$skip_layer" ]]; then
+          skip=true
+          break
+        fi
+      done
+      if ! $skip; then
+        filtered+=("$layer")
+      fi
+    done
+    ACTIVE_LAYERS=("${filtered[@]}")
+  fi
+  
+  # Sort layers in correct order
+  local ordered=()
+  for layer in "${ALL_LAYERS[@]}"; do
+    for active in "${ACTIVE_LAYERS[@]}"; do
+      if [[ "$layer" == "$active" ]]; then
+        ordered+=("$layer")
+        break
+      fi
+    done
+  done
+  ACTIVE_LAYERS=("${ordered[@]}")
+  
+  # Return remaining args
+  echo "${remaining_args[@]}"
+}
+
+#------------------------------------------------------------------------------
+# Helper functions
+#------------------------------------------------------------------------------
+
+log_info() {
+  echo -e "${BLUE}ℹ${NC} $1"
+}
+
+log_success() {
+  echo -e "${GREEN}✓${NC} $1"
+}
+
+log_warn() {
+  echo -e "${YELLOW}⚠${NC} $1"
+}
+
+log_error() {
+  echo -e "${RED}✗${NC} $1" >&2
+}
+
+log_header() {
+  echo -e "\n${BOLD}${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+  echo -e "${BOLD}${CYAN}  $1${NC}"
+  echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════${NC}\n"
+}
+
+# Check if a command exists
+require_cmd() {
+  if ! command -v "$1" &> /dev/null; then
+    log_error "Required command '$1' not found. Please install it first."
+    exit 1
+  fi
+}
+
+# Load environment variables from .env file if it exists
+load_env() {
+  local env_file="$ROOT_DIR/.env"
+  if [[ -f "$env_file" ]]; then
+    log_info "Loading environment from .env"
+    set -a
+    # shellcheck source=/dev/null
+    source "$env_file"
+    set +a
+  fi
+}
+
+# Get subscription_id from env or Azure CLI
+get_subscription_id() {
+  if [[ -n "${ARM_SUBSCRIPTION_ID:-}" ]]; then
+    echo "$ARM_SUBSCRIPTION_ID"
+  elif [[ -n "${SUBSCRIPTION_ID:-}" ]]; then
+    echo "$SUBSCRIPTION_ID"
+  else
+    # Try to get from az cli
+    if command -v az &> /dev/null; then
+      az account show --query id -o tsv 2>/dev/null || true
+    fi
+  fi
+}
+
+# Validate stamp_id is provided
+require_stamp_id() {
+  if [[ -z "${1:-}" ]]; then
+    log_error "stamp_id is required for this command"
+    echo "Usage: $0 $COMMAND <stamp_id>"
+    echo ""
+    echo "Available stamps:"
+    cmd_list_short
+    exit 1
+  fi
+}
+
+# Check if bootstrap has been applied
+is_bootstrapped() {
+  if [[ -f "$BOOTSTRAP_DIR/terraform.tfstate" ]]; then
+    if terraform -chdir="$BOOTSTRAP_DIR" output -raw resource_group_name &>/dev/null; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# Get bootstrap backend info
+get_backend_config() {
+  if ! is_bootstrapped; then
+    log_error "Bootstrap not found. Run './scripts/stamp bootstrap' first."
+    exit 1
+  fi
+  
+  TFSTATE_RG=$(terraform -chdir="$BOOTSTRAP_DIR" output -raw resource_group_name)
+  TFSTATE_SA=$(terraform -chdir="$BOOTSTRAP_DIR" output -raw storage_account_name)
+  TFSTATE_CONTAINER=$(terraform -chdir="$BOOTSTRAP_DIR" output -raw container_name)
+}
+
+# Pre-flight checks
+preflight_check() {
+  log_info "Running pre-flight checks..."
+  
+  require_cmd terraform
+  require_cmd az
+  
+  # Check Azure CLI login
+  if ! az account show &>/dev/null; then
+    log_error "Not logged into Azure CLI. Run 'az login' first."
+    exit 1
+  fi
+  
+  local sub_id
+  sub_id=$(get_subscription_id)
+  if [[ -n "$sub_id" ]]; then
+    log_info "Using subscription: $sub_id"
+  fi
+  
+  log_success "Pre-flight checks passed"
+}
+
+#------------------------------------------------------------------------------
+# Commands
+#------------------------------------------------------------------------------
+
+cmd_list_short() {
+  grep -E '^\s{4}[a-z][a-z0-9-]*\s*=' "$MODULES_DIR/stamp/main.tf" 2>/dev/null | \
+    sed 's/[[:space:]]*\([a-zA-Z0-9_-]*\).*/  \1/' | \
+    grep -v "^  _" || true  # Exclude internal stamps like _bootstrap
+}
+
+cmd_list() {
+  log_header "Available Stamps"
+  
+  local stamp_file="$MODULES_DIR/stamp/main.tf"
+  if [[ ! -f "$stamp_file" ]]; then
+    log_error "Stamp catalog not found at $stamp_file"
+    exit 1
+  fi
+  
+  printf "${BOLD}%-15s %-16s %-12s %-18s %s${NC}\n" "STAMP ID" "REGION" "ENV" "VM SIZE" "ADDRESS SPACE"
+  echo "─────────────────────────────────────────────────────────────────────────────"
+  
+  # Parse stamps from the catalog (skip _bootstrap)
+  local current_stamp=""
+  local in_stamp=false
+  local location="" environment="" vm_size="" address_space=""
+  
+  while IFS= read -r line; do
+    # Detect stamp block start (e.g., "    swc-dev = {")
+    if [[ "$line" =~ ^[[:space:]]{4}([a-z][a-z0-9-]*)[[:space:]]*=[[:space:]]*\{ ]]; then
+      current_stamp="${BASH_REMATCH[1]}"
+      in_stamp=true
+      location="" environment="" vm_size="" address_space=""
+      continue
+    fi
+    
+    # Skip internal stamps
+    if [[ "$current_stamp" == _* ]]; then
+      continue
+    fi
+    
+    if $in_stamp; then
+      # Extract values
+      if [[ "$line" =~ location[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
+        location="${BASH_REMATCH[1]}"
+      elif [[ "$line" =~ environment[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
+        environment="${BASH_REMATCH[1]}"
+      elif [[ "$line" =~ aks_vm_size[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
+        vm_size="${BASH_REMATCH[1]}"
+      elif [[ "$line" =~ address_space[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
+        address_space="${BASH_REMATCH[1]}"
+      fi
+      
+      # Detect end of stamp block
+      if [[ "$line" =~ ^[[:space:]]{4}\} ]]; then
+        if [[ -n "$current_stamp" && -n "$location" ]]; then
+          printf "%-15s %-16s %-12s %-18s %s\n" \
+            "$current_stamp" "$location" "$environment" "$vm_size" "$address_space"
+        fi
+        in_stamp=false
+        current_stamp=""
+      fi
+    fi
+  done < "$stamp_file"
+  
+  echo ""
+  if is_bootstrapped; then
+    log_success "Bootstrap: Deployed"
+  else
+    log_warn "Bootstrap: Not deployed (run './scripts/stamp bootstrap' first)"
+  fi
+  echo ""
+  log_info "To deploy a stamp: ./scripts/stamp deploy <stamp_id>"
+}
+
+cmd_bootstrap() {
+  local subscription_id="${1:-$(get_subscription_id)}"
+  
+  log_header "Bootstrapping Shared State Backend"
+  
+  if [[ -z "$subscription_id" ]]; then
+    log_error "subscription_id is required. Set ARM_SUBSCRIPTION_ID or pass as argument."
+    echo "Usage: ./scripts/stamp bootstrap [subscription_id]"
+    exit 1
+  fi
+  
+  if is_bootstrapped; then
+    log_warn "Bootstrap already exists!"
+    echo ""
+    echo "Current backend:"
+    echo "  Resource Group:    $(terraform -chdir="$BOOTSTRAP_DIR" output -raw resource_group_name)"
+    echo "  Storage Account:   $(terraform -chdir="$BOOTSTRAP_DIR" output -raw storage_account_name)"
+    echo "  Container:         $(terraform -chdir="$BOOTSTRAP_DIR" output -raw container_name)"
+    echo ""
+    read -p "Re-apply bootstrap? [y/N] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+      log_info "Skipped."
+      return 0
+    fi
+  fi
+  
+  preflight_check
+  
+  log_info "Subscription: $subscription_id"
+  log_info "Using stamp config: $BOOTSTRAP_STAMP_ID"
+  
+  cd "$BOOTSTRAP_DIR"
+  
+  log_info "Initializing bootstrap layer..."
+  terraform init -upgrade
+  
+  log_info "Applying bootstrap layer..."
+  terraform apply \
+    -var="subscription_id=$subscription_id" \
+    -var="stamp_id=$BOOTSTRAP_STAMP_ID"
+  
+  log_success "Bootstrap complete!"
+  echo ""
+  echo "Shared state backend created:"
+  echo "  Resource Group:    $(terraform output -raw resource_group_name)"
+  echo "  Storage Account:   $(terraform output -raw storage_account_name)"
+  echo "  Container:         $(terraform output -raw container_name)"
+  echo ""
+  log_info "You can now deploy stamps with: ./scripts/stamp deploy <stamp_id>"
+}
+
+cmd_init() {
+  local stamp_id="$1"
+  shift || true
+  
+  # Parse layer options from remaining args
+  local remaining
+  remaining=$(parse_layer_options "$@")
+  
+  log_header "Initializing Layers for Stamp: $stamp_id"
+  
+  get_backend_config
+  
+  log_info "Layers: ${ACTIVE_LAYERS[*]}"
+  echo ""
+  
+  for layer in "${ACTIVE_LAYERS[@]}"; do
+    local layer_dir="$LAYERS_DIR/$layer"
+    local state_key="${stamp_id}/${layer#*-}.tfstate"
+    
+    log_info "Initializing $layer (state: $state_key)..."
+    
+    terraform -chdir="$layer_dir" init -reconfigure \
+      -backend-config="resource_group_name=${TFSTATE_RG}" \
+      -backend-config="storage_account_name=${TFSTATE_SA}" \
+      -backend-config="container_name=${TFSTATE_CONTAINER}" \
+      -backend-config="use_azuread_auth=true" \
+      -backend-config="key=${state_key}"
+  done
+  
+  log_success "Layers initialized for $stamp_id!"
+}
+
+cmd_plan() {
+  local stamp_id="$1"
+  shift || true
+  
+  # Parse layer options
+  local remaining
+  remaining=$(parse_layer_options "$@")
+  
+  # Get subscription from remaining args or env
+  local subscription_id=""
+  for arg in $remaining; do
+    if [[ -z "$subscription_id" ]] && [[ "$arg" != -* ]]; then
+      subscription_id="$arg"
+    fi
+  done
+  subscription_id="${subscription_id:-$(get_subscription_id)}"
+  
+  log_header "Planning Stamp: $stamp_id"
+  
+  if [[ -z "$subscription_id" ]]; then
+    log_error "subscription_id is required. Set ARM_SUBSCRIPTION_ID or pass as argument."
+    exit 1
+  fi
+  
+  log_info "Layers: ${ACTIVE_LAYERS[*]}"
+  echo ""
+  
+  # Ensure layers are initialized
+  cmd_init "$stamp_id"
+  
+  for layer in "${ACTIVE_LAYERS[@]}"; do
+    local layer_dir="$LAYERS_DIR/$layer"
+    
+    log_info "Planning $layer..."
+    terraform -chdir="$layer_dir" plan \
+      -var="subscription_id=$subscription_id" \
+      -var="stamp_id=$stamp_id"
+  done
+  
+  log_success "Plan complete!"
+}
+
+cmd_deploy() {
+  local stamp_id="$1"
+  shift || true
+  
+  # Extract --auto-approve first, pass rest to parse_layer_options
+  local auto_approve=""
+  local layer_args=()
+  
+  for arg in "$@"; do
+    case "$arg" in
+      --auto-approve|-y)
+        auto_approve="--auto-approve"
+        ;;
+      *)
+        layer_args+=("$arg")
+        ;;
+    esac
+  done
+  
+  # Parse layer options - this sets ACTIVE_LAYERS
+  parse_layer_options "${layer_args[@]}" > /dev/null
+  
+  local subscription_id
+  subscription_id="$(get_subscription_id)"
+  
+  log_header "Deploying Stamp: $stamp_id"
+  
+  if [[ -z "$subscription_id" ]]; then
+    log_error "subscription_id is required. Set ARM_SUBSCRIPTION_ID or pass as argument."
+    exit 1
+  fi
+  
+  if ! is_bootstrapped; then
+    log_error "Bootstrap not found. Run './scripts/stamp bootstrap' first."
+    exit 1
+  fi
+  
+  log_info "Layers: ${ACTIVE_LAYERS[*]}"
+  echo ""
+  
+  # Initialize layers for this stamp (pass layers explicitly)
+  local layer_list
+  layer_list=$(IFS=,; echo "${ACTIVE_LAYERS[*]}")
+  cmd_init "$stamp_id" --layers "$layer_list"
+  
+  local approve_flag=""
+  if [[ -n "$auto_approve" ]]; then
+    approve_flag="-auto-approve"
+  fi
+  
+  for layer in "${ACTIVE_LAYERS[@]}"; do
+    local layer_dir="$LAYERS_DIR/$layer"
+    
+    log_info "Deploying $layer..."
+    terraform -chdir="$layer_dir" apply \
+      -var="subscription_id=$subscription_id" \
+      -var="stamp_id=$stamp_id" \
+      $approve_flag
+    
+    log_success "$layer deployed!"
+  done
+  
+  log_success "Stamp $stamp_id deployed successfully!"
+  echo ""
+  echo "Next steps:"
+  echo "  • Get AKS credentials: az aks get-credentials -g rg-$stamp_id-compute -n aks-$stamp_id"
+  echo "  • Check status: ./scripts/stamp status $stamp_id"
+}
+
+cmd_deploy_all() {
+  local stamp_id="$1"
+  shift || true
+  
+  # Extract --auto-approve first, pass rest to parse_layer_options
+  local auto_approve=""
+  local layer_args=()
+  
+  for arg in "$@"; do
+    case "$arg" in
+      --auto-approve|-y)
+        auto_approve="--auto-approve"
+        ;;
+      *)
+        layer_args+=("$arg")
+        ;;
+    esac
+  done
+  
+  # Parse layers to set ACTIVE_LAYERS
+  parse_layer_options "${layer_args[@]}" > /dev/null
+  
+  local subscription_id
+  subscription_id="$(get_subscription_id)"
+  
+  log_header "Full Deployment: $stamp_id"
+  
+  preflight_check
+  
+  log_info "This will deploy layers: ${ACTIVE_LAYERS[*]}"
+  echo ""
+  
+  # Bootstrap if needed
+  if ! is_bootstrapped; then
+    log_warn "Bootstrap not found. Will create shared state backend first."
+    echo ""
+    if [[ -z "$auto_approve" ]]; then
+      read -p "Continue? [y/N] " -n 1 -r
+      echo
+      if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        log_info "Aborted."
+        exit 0
+      fi
+    fi
+    cmd_bootstrap "$subscription_id"
+  else
+    log_success "Bootstrap already exists"
+  fi
+  
+  # Deploy with layer options
+  cmd_deploy "$stamp_id" "${layer_args[@]}" --auto-approve
+  
+  log_header "Deployment Complete! 🎉"
+  echo -e "Stamp ${GREEN}$stamp_id${NC} is now deployed."
+}
+
+cmd_destroy() {
+  local stamp_id="$1"
+  shift || true
+  
+  # Extract --auto-approve first, pass rest to parse_layer_options
+  local auto_approve=""
+  local layer_args=()
+  
+  for arg in "$@"; do
+    case "$arg" in
+      --auto-approve|-y)
+        auto_approve="--auto-approve"
+        ;;
+      *)
+        layer_args+=("$arg")
+        ;;
+    esac
+  done
+  
+  # Parse layer options (use ALL_LAYERS as base for destroy if no --layers specified)
+  if [[ ${#layer_args[@]} -eq 0 ]]; then
+    ACTIVE_LAYERS=("${ALL_LAYERS[@]}")
+  else
+    parse_layer_options "${layer_args[@]}" > /dev/null
+  fi
+  
+  local subscription_id
+  subscription_id="$(get_subscription_id)"
+  
+  log_header "Destroying Stamp: $stamp_id"
+  
+  log_warn "This will DESTROY layers: ${ACTIVE_LAYERS[*]}"
+  echo ""
+  
+  if [[ -z "$auto_approve" ]]; then
+    read -p "Are you sure? Type '$stamp_id' to confirm: " -r
+    if [[ "$REPLY" != "$stamp_id" ]]; then
+      log_info "Aborted."
+      exit 0
+    fi
+  fi
+  
+  # Initialize layers for this stamp first
+  if is_bootstrapped; then
+    local layer_list
+    layer_list=$(IFS=,; echo "${ACTIVE_LAYERS[*]}")
+    cmd_init "$stamp_id" --layers "$layer_list" 2>/dev/null || true
+  fi
+  
+  # Destroy in reverse order
+  local reversed_layers=()
+  for ((i=${#ACTIVE_LAYERS[@]}-1; i>=0; i--)); do
+    reversed_layers+=("${ACTIVE_LAYERS[$i]}")
+  done
+  
+  for layer in "${reversed_layers[@]}"; do
+    local layer_dir="$LAYERS_DIR/$layer"
+    
+    log_info "Destroying $layer..."
+    terraform -chdir="$layer_dir" destroy \
+      -var="subscription_id=$subscription_id" \
+      -var="stamp_id=$stamp_id" \
+      -auto-approve 2>/dev/null || log_warn "$layer: Nothing to destroy or not initialized"
+  done
+  
+  log_warn "Bootstrap (shared state backend) was NOT destroyed."
+  log_info "To destroy bootstrap: terraform -chdir=$BOOTSTRAP_DIR destroy -var='stamp_id=_bootstrap' -var='subscription_id=<SUB_ID>'"
+  
+  log_success "Stamp $stamp_id destroyed!"
+}
+
+cmd_status() {
+  local stamp_id="${1:-}"
+  
+  log_header "Deployment Status"
+  
+  # Bootstrap status
+  if is_bootstrapped; then
+    log_success "Bootstrap: Deployed"
+    echo "  Storage Account: $(terraform -chdir="$BOOTSTRAP_DIR" output -raw storage_account_name 2>/dev/null)"
+  else
+    log_warn "Bootstrap: Not deployed"
+    return
+  fi
+  echo ""
+  
+  if [[ -z "$stamp_id" ]]; then
+    log_info "Specify a stamp_id to see detailed layer status"
+    echo "Usage: ./scripts/stamp status <stamp_id>"
+    return
+  fi
+  
+  echo "Stamp: $stamp_id"
+  echo "─────────────────────────────"
+  
+  # Temporarily init and check each layer
+  get_backend_config
+  
+  for layer in "${ALL_LAYERS[@]}"; do
+    local layer_dir="$LAYERS_DIR/$layer"
+    local state_key="${stamp_id}/${layer#*-}.tfstate"
+    
+    # Try to init quietly
+    if terraform -chdir="$layer_dir" init -reconfigure \
+      -backend-config="resource_group_name=${TFSTATE_RG}" \
+      -backend-config="storage_account_name=${TFSTATE_SA}" \
+      -backend-config="container_name=${TFSTATE_CONTAINER}" \
+      -backend-config="use_azuread_auth=true" \
+      -backend-config="key=${state_key}" &>/dev/null; then
+      
+      local resource_count
+      resource_count=$(terraform -chdir="$layer_dir" state list 2>/dev/null | wc -l || echo "0")
+      
+      if [[ "$resource_count" -gt 0 ]]; then
+        log_success "$layer: Deployed ($resource_count resources)"
+      else
+        log_warn "$layer: Not deployed"
+      fi
+    else
+      log_warn "$layer: Not initialized"
+    fi
+  done
+}
+
+cmd_validate() {
+  log_header "Validating Terraform Configuration"
+  
+  local all_valid=true
+  
+  # Validate modules first
+  for module_dir in "$MODULES_DIR"/*; do
+    if [[ -d "$module_dir" ]]; then
+      local module_name
+      module_name=$(basename "$module_dir")
+      # Modules can't be validated standalone easily, skip
+    fi
+  done
+  
+  # Validate layers
+  for layer_dir in "$LAYERS_DIR"/*; do
+    if [[ -d "$layer_dir" ]]; then
+      local layer_name
+      layer_name=$(basename "$layer_dir")
+      log_info "Validating $layer_name..."
+      
+      # Need to init first (with any backend config for validation)
+      if [[ "$layer_name" == "00-bootstrap" ]]; then
+        terraform -chdir="$layer_dir" init -backend=false &>/dev/null || true
+      else
+        terraform -chdir="$layer_dir" init -backend=false &>/dev/null || true
+      fi
+      
+      if terraform -chdir="$layer_dir" validate &>/dev/null; then
+        log_success "$layer_name: Valid"
+      else
+        log_error "$layer_name: Invalid"
+        terraform -chdir="$layer_dir" validate
+        all_valid=false
+      fi
+    fi
+  done
+  
+  if $all_valid; then
+    log_success "All configurations valid!"
+  else
+    log_error "Some configurations have validation errors"
+    exit 1
+  fi
+}
+
+cmd_fmt() {
+  log_header "Formatting Terraform Files"
+  
+  terraform fmt -recursive "$ROOT_DIR/terraform"
+  
+  log_success "Formatting complete!"
+}
+
+cmd_help() {
+  cat << 'EOF'
+stamp - Unified CLI for managing Azure stamp deployments
+
+Usage:
+  ./scripts/stamp <command> [stamp_id] [options]
+
+Commands:
+  list                    List all available stamps from the catalog
+  bootstrap               Initialize the shared Terraform state backend (run once)
+  init <stamp_id>         Initialize layer backends for a specific stamp
+  plan <stamp_id>         Plan layers without applying
+  deploy <stamp_id>       Deploy layers in order
+  deploy-all <stamp_id>   Bootstrap (if needed) + init + deploy
+  destroy <stamp_id>      Destroy layers in reverse order
+  status [stamp_id]       Show deployment status
+  validate                Validate Terraform configuration
+  fmt                     Format all Terraform files
+  help                    Show this help message
+
+Layer Selection:
+  --layers, -l <list>     Deploy only specified layers (comma-separated)
+  --skip, -s <list>       Skip specified layers (comma-separated)
+
+  Layer names (use any form):
+    networking, net, 01   -> 01-networking
+    shared, 02            -> 02-shared
+    database, db, 03      -> 03-database
+    compute, 04           -> 04-compute
+
+  Default layers: networking, shared, compute (database skipped by default)
+
+Options:
+  --auto-approve, -y      Skip confirmation prompts
+
+Environment Variables:
+  ARM_SUBSCRIPTION_ID     Azure subscription ID
+  
+Workflow:
+  1. Bootstrap (once):     ./scripts/stamp bootstrap
+  2. Deploy a stamp:       ./scripts/stamp deploy swc-dev
+  3. Deploy another:       ./scripts/stamp deploy neu-prod
+  4. Check status:         ./scripts/stamp status swc-dev
+
+Examples:
+  # First time setup
+  ./scripts/stamp bootstrap
+  
+  # Deploy development stamp (default layers: networking, shared, compute)
+  ./scripts/stamp deploy swc-dev
+  
+  # Deploy only networking and compute (skip shared)
+  ./scripts/stamp deploy swc-dev --layers networking,compute
+  
+  # Deploy all default layers except shared
+  ./scripts/stamp deploy swc-dev --skip shared
+  
+  # Deploy only compute layer
+  ./scripts/stamp deploy swc-dev -l compute
+  
+  # Deploy production stamp to different region
+  ./scripts/stamp deploy neu-prod
+  
+  # Full deployment (bootstrap + deploy) in one command
+  ./scripts/stamp deploy-all swc-dev
+  
+  # Plan changes before applying
+  ./scripts/stamp plan swc-dev
+  
+  # Destroy a stamp
+  ./scripts/stamp destroy swc-dev
+
+EOF
+}
+
+#------------------------------------------------------------------------------
+# Main
+#------------------------------------------------------------------------------
+
+main() {
+  load_env
+  
+  COMMAND="${1:-help}"
+  shift || true
+  
+  case "$COMMAND" in
+    list|ls)
+      cmd_list
+      ;;
+    bootstrap|boot)
+      cmd_bootstrap "$@"
+      ;;
+    init)
+      require_stamp_id "${1:-}"
+      cmd_init "$@"
+      ;;
+    plan)
+      require_stamp_id "${1:-}"
+      cmd_plan "$@"
+      ;;
+    deploy)
+      require_stamp_id "${1:-}"
+      cmd_deploy "$@"
+      ;;
+    deploy-all|full)
+      require_stamp_id "${1:-}"
+      cmd_deploy_all "$@"
+      ;;
+    destroy)
+      require_stamp_id "${1:-}"
+      cmd_destroy "$@"
+      ;;
+    status|st)
+      cmd_status "$@"
+      ;;
+    validate)
+      cmd_validate
+      ;;
+    fmt|format)
+      cmd_fmt
+      ;;
+    help|--help|-h)
+      cmd_help
+      ;;
+    *)
+      log_error "Unknown command: $COMMAND"
+      cmd_help
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

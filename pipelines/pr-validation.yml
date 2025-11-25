@@ -1,0 +1,212 @@
+# Azure DevOps Pipeline: PR Validation
+#
+# Validates Terraform code on pull requests.
+# Runs terraform validate and plan (without apply).
+
+trigger: none
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - terraform/**
+      - pipelines/**
+
+parameters:
+  - name: stampId
+    displayName: 'Stamp to validate against'
+    type: string
+    default: 'swc-dev'
+    values:
+      - swc-dev
+      - swc-staging
+      - swc-prod
+      - neu-dev
+      - neu-prod
+
+variables:
+  - group: stamp-common
+  - name: serviceConnection
+    value: 'azure-infra-dev'
+  - name: terraformVersion
+    value: 'latest'
+
+stages:
+  - stage: Validate
+    displayName: 'Validate Terraform'
+    jobs:
+      - job: ValidateCode
+        displayName: 'Validate & Format Check'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: $(terraformVersion)
+
+          - script: |
+              echo "🔍 Checking Terraform formatting..."
+              cd terraform
+              terraform fmt -check -recursive -diff
+            displayName: 'Check Formatting'
+
+          - task: AzureCLI@2
+            displayName: 'Validate All Layers'
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                set -e
+                
+                STAMP_ID="${{ parameters.stampId }}"
+                
+                for layer in 01-networking 02-shared 04-compute; do
+                  echo ""
+                  echo "═══════════════════════════════════════════════════════"
+                  echo "Validating: $layer"
+                  echo "═══════════════════════════════════════════════════════"
+                  
+                  cd terraform/layers/$layer
+                  
+                  # Get backend config from stamp module
+                  BACKEND_RG=$(cd ../../modules/stamp && terraform output -json | jq -r ".backend.value.resource_group_name // empty" 2>/dev/null || echo "")
+                  
+                  # Initialize with backend (or skip if not bootstrapped)
+                  if [ -n "$BACKEND_RG" ]; then
+                    terraform init \
+                      -backend-config="resource_group_name=$BACKEND_RG" \
+                      -backend-config="storage_account_name=$(cd ../../modules/stamp && terraform output -raw backend | jq -r '.storage_account_name')" \
+                      -backend-config="container_name=$(cd ../../modules/stamp && terraform output -raw backend | jq -r '.container_name')" \
+                      -backend-config="key=$STAMP_ID/${layer#*-}.tfstate" \
+                      -input=false
+                  else
+                    # Just validate syntax without backend
+                    terraform init -backend=false -input=false
+                  fi
+                  
+                  terraform validate
+                  echo "✅ $layer validated successfully"
+                  
+                  cd ../../..
+                done
+                
+                echo ""
+                echo "═══════════════════════════════════════════════════════"
+                echo "✅ All layers validated successfully"
+                echo "═══════════════════════════════════════════════════════"
+
+  - stage: Plan
+    displayName: 'Plan Changes'
+    dependsOn: Validate
+    jobs:
+      - job: PlanLayers
+        displayName: 'Generate Plans'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: $(terraformVersion)
+
+          - task: AzureCLI@2
+            displayName: 'Plan All Layers'
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                set -e
+                
+                STAMP_ID="${{ parameters.stampId }}"
+                SUBSCRIPTION_ID=$(SUBSCRIPTION_ID)
+                
+                mkdir -p $(Build.ArtifactStagingDirectory)/plans
+                
+                # Get backend config
+                cd terraform/modules/stamp
+                terraform init -input=false > /dev/null
+                BACKEND=$(terraform output -json backend 2>/dev/null || echo "{}")
+                cd ../../..
+                
+                BACKEND_RG=$(echo $BACKEND | jq -r ".resource_group_name // empty")
+                BACKEND_SA=$(echo $BACKEND | jq -r ".storage_account_name // empty")
+                BACKEND_CONTAINER=$(echo $BACKEND | jq -r ".container_name // empty")
+                
+                if [ -z "$BACKEND_RG" ]; then
+                  echo "⚠️ Backend not bootstrapped yet, skipping detailed plans"
+                  exit 0
+                fi
+                
+                for layer in 01-networking 02-shared 04-compute; do
+                  echo ""
+                  echo "═══════════════════════════════════════════════════════"
+                  echo "Planning: $layer for stamp $STAMP_ID"
+                  echo "═══════════════════════════════════════════════════════"
+                  
+                  cd terraform/layers/$layer
+                  
+                  terraform init \
+                    -backend-config="resource_group_name=$BACKEND_RG" \
+                    -backend-config="storage_account_name=$BACKEND_SA" \
+                    -backend-config="container_name=$BACKEND_CONTAINER" \
+                    -backend-config="key=$STAMP_ID/${layer#*-}.tfstate" \
+                    -input=false
+                  
+                  # Create plan
+                  terraform plan \
+                    -var="subscription_id=$SUBSCRIPTION_ID" \
+                    -var="stamp_id=$STAMP_ID" \
+                    -out=$(Build.ArtifactStagingDirectory)/plans/${layer}.tfplan \
+                    -input=false
+                  
+                  # Save human-readable plan for PR comment
+                  terraform show -no-color $(Build.ArtifactStagingDirectory)/plans/${layer}.tfplan \
+                    > $(Build.ArtifactStagingDirectory)/plans/${layer}.txt
+                  
+                  cd ../../..
+                done
+              addSpnToEnvironment: true
+
+          - publish: $(Build.ArtifactStagingDirectory)/plans
+            artifact: terraform-plans
+            displayName: 'Publish Plans'
+            condition: succeededOrFailed()
+
+      - job: SummarizePlans
+        displayName: 'Summarize Changes'
+        dependsOn: PlanLayers
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - download: current
+            artifact: terraform-plans
+            displayName: 'Download Plans'
+
+          - script: |
+              echo "═══════════════════════════════════════════════════════"
+              echo "📋 Terraform Plan Summary"
+              echo "═══════════════════════════════════════════════════════"
+              echo ""
+              
+              for plan in $(Pipeline.Workspace)/terraform-plans/*.txt; do
+                if [ -f "$plan" ]; then
+                  layer=$(basename $plan .txt)
+                  echo "### Layer: $layer"
+                  echo ""
+                  
+                  # Extract summary line
+                  grep -E "Plan:|No changes" "$plan" || echo "No plan output"
+                  echo ""
+                fi
+              done
+            displayName: 'Show Plan Summary'

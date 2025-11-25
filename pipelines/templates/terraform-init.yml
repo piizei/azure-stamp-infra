@@ -1,0 +1,57 @@
+# Template: Initialize Terraform with shared backend
+# Assumes bootstrap has been applied and remote state exists
+
+parameters:
+  - name: workingDirectory
+    type: string
+  - name: stampId
+    type: string
+  - name: layer
+    type: string
+  - name: serviceConnection
+    type: string
+
+steps:
+  - task: AzureCLI@2
+    displayName: 'Get Bootstrap Backend Config'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        # Get backend config from bootstrap outputs
+        cd terraform/layers/00-bootstrap
+        
+        # Initialize bootstrap to read outputs (local state)
+        terraform init -input=false
+        
+        TFSTATE_RG=$(terraform output -raw resource_group_name)
+        TFSTATE_SA=$(terraform output -raw storage_account_name)
+        TFSTATE_CONTAINER=$(terraform output -raw container_name)
+        
+        echo "##vso[task.setvariable variable=TFSTATE_RG]${TFSTATE_RG}"
+        echo "##vso[task.setvariable variable=TFSTATE_SA]${TFSTATE_SA}"
+        echo "##vso[task.setvariable variable=TFSTATE_CONTAINER]${TFSTATE_CONTAINER}"
+        
+        echo "Backend: ${TFSTATE_SA}/${TFSTATE_CONTAINER}"
+      addSpnToEnvironment: true
+      workingDirectory: $(System.DefaultWorkingDirectory)
+
+  - task: AzureCLI@2
+    displayName: 'Terraform Init - ${{ parameters.layer }}'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        STATE_KEY="${{ parameters.stampId }}/${{ parameters.layer }}.tfstate"
+        echo "Initializing with state key: ${STATE_KEY}"
+        
+        terraform init -input=false \
+          -backend-config="resource_group_name=$(TFSTATE_RG)" \
+          -backend-config="storage_account_name=$(TFSTATE_SA)" \
+          -backend-config="container_name=$(TFSTATE_CONTAINER)" \
+          -backend-config="use_azuread_auth=true" \
+          -backend-config="key=${STATE_KEY}"
+      addSpnToEnvironment: true
+      workingDirectory: ${{ parameters.workingDirectory }}

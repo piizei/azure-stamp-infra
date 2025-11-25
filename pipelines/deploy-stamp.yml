@@ -1,0 +1,480 @@
+# Azure DevOps Pipeline: Deploy Stamp Infrastructure
+#
+# This pipeline deploys infrastructure layers for a selected stamp.
+# Prerequisites:
+#   1. Bootstrap has been run locally (./scripts/stamp bootstrap)
+#   2. Variable groups configured in ADO Library:
+#      - stamp-common: Common variables (SUBSCRIPTION_ID)
+#      - stamp-dev: Dev-specific overrides (optional)
+#      - stamp-prod: Prod-specific overrides (optional)
+#   3. Service connection with Contributor + RBAC Admin on subscription
+#
+# Usage:
+#   - Select stamp from dropdown
+#   - Choose which layers to deploy
+#   - Production stamps require manual approval
+
+trigger: none  # Manual trigger only
+
+pr: none  # Don't run on PRs
+
+parameters:
+  # Stamp selection dropdown
+  - name: stamp
+    displayName: 'Target Stamp'
+    type: string
+    default: 'swc-dev'
+    values:
+      - swc-dev
+      - swc-staging
+      - swc-prod
+      - neu-dev
+      - neu-prod
+
+  # Layer selection
+  - name: layers
+    displayName: 'Layers to Deploy'
+    type: string
+    default: 'networking,compute'
+    values:
+      - 'networking'
+      - 'shared'
+      - 'compute'
+      - 'networking,shared'
+      - 'networking,compute'
+      - 'networking,shared,compute'
+      - 'shared,compute'
+      - 'all'
+
+  # Destroy mode (be careful!)
+  - name: destroy
+    displayName: 'Destroy Infrastructure'
+    type: boolean
+    default: false
+
+variables:
+  # Variable group with subscription ID and common settings
+  - group: stamp-common
+  
+  # Conditional variable groups based on environment
+  - ${{ if contains(parameters.stamp, '-dev') }}:
+    - group: stamp-dev
+  - ${{ if contains(parameters.stamp, '-staging') }}:
+    - group: stamp-staging
+  - ${{ if contains(parameters.stamp, '-prod') }}:
+    - group: stamp-prod
+
+  # Derived variables
+  - name: stampId
+    value: ${{ parameters.stamp }}
+  - name: isProduction
+    value: ${{ contains(parameters.stamp, '-prod') }}
+  - name: serviceConnection
+    value: 'azure-infra-$(stampId)'  # Or use a single connection
+
+  # Layer flags
+  - name: deployNetworking
+    value: ${{ or(eq(parameters.layers, 'all'), contains(parameters.layers, 'networking')) }}
+  - name: deployShared
+    value: ${{ or(eq(parameters.layers, 'all'), contains(parameters.layers, 'shared')) }}
+  - name: deployCompute
+    value: ${{ or(eq(parameters.layers, 'all'), contains(parameters.layers, 'compute')) }}
+
+stages:
+  # =============================================================================
+  # Plan Stage - Always runs first
+  # =============================================================================
+  - stage: Plan
+    displayName: 'Plan - ${{ parameters.stamp }}'
+    jobs:
+      - job: TerraformPlan
+        displayName: 'Terraform Plan'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: 'latest'
+
+          - task: AzureCLI@2
+            displayName: 'Get Bootstrap Backend Config'
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                cd terraform/layers/00-bootstrap
+                terraform init -input=false
+                
+                TFSTATE_RG=$(terraform output -raw resource_group_name)
+                TFSTATE_SA=$(terraform output -raw storage_account_name)
+                TFSTATE_CONTAINER=$(terraform output -raw container_name)
+                
+                echo "##vso[task.setvariable variable=TFSTATE_RG;isOutput=true]${TFSTATE_RG}"
+                echo "##vso[task.setvariable variable=TFSTATE_SA;isOutput=true]${TFSTATE_SA}"
+                echo "##vso[task.setvariable variable=TFSTATE_CONTAINER;isOutput=true]${TFSTATE_CONTAINER}"
+                
+                echo "📦 Backend: ${TFSTATE_SA}/${TFSTATE_CONTAINER}"
+              addSpnToEnvironment: true
+            name: backend
+
+          # Plan Networking
+          - ${{ if eq(variables.deployNetworking, true) }}:
+            - task: AzureCLI@2
+              displayName: 'Plan: 01-networking'
+              inputs:
+                azureSubscription: $(serviceConnection)
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  cd terraform/layers/01-networking
+                  
+                  terraform init -input=false -reconfigure \
+                    -backend-config="resource_group_name=$(backend.TFSTATE_RG)" \
+                    -backend-config="storage_account_name=$(backend.TFSTATE_SA)" \
+                    -backend-config="container_name=$(backend.TFSTATE_CONTAINER)" \
+                    -backend-config="use_azuread_auth=true" \
+                    -backend-config="key=$(stampId)/networking.tfstate"
+                  
+                  terraform plan \
+                    -var="subscription_id=$(SUBSCRIPTION_ID)" \
+                    -var="stamp_id=$(stampId)" \
+                    -out=tfplan-networking \
+                    -input=false
+                addSpnToEnvironment: true
+
+          # Plan Shared
+          - ${{ if eq(variables.deployShared, true) }}:
+            - task: AzureCLI@2
+              displayName: 'Plan: 02-shared'
+              inputs:
+                azureSubscription: $(serviceConnection)
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  cd terraform/layers/02-shared
+                  
+                  terraform init -input=false -reconfigure \
+                    -backend-config="resource_group_name=$(backend.TFSTATE_RG)" \
+                    -backend-config="storage_account_name=$(backend.TFSTATE_SA)" \
+                    -backend-config="container_name=$(backend.TFSTATE_CONTAINER)" \
+                    -backend-config="use_azuread_auth=true" \
+                    -backend-config="key=$(stampId)/shared.tfstate"
+                  
+                  terraform plan \
+                    -var="subscription_id=$(SUBSCRIPTION_ID)" \
+                    -var="stamp_id=$(stampId)" \
+                    -out=tfplan-shared \
+                    -input=false
+                addSpnToEnvironment: true
+
+          # Plan Compute
+          - ${{ if eq(variables.deployCompute, true) }}:
+            - task: AzureCLI@2
+              displayName: 'Plan: 04-compute'
+              inputs:
+                azureSubscription: $(serviceConnection)
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  cd terraform/layers/04-compute
+                  
+                  terraform init -input=false -reconfigure \
+                    -backend-config="resource_group_name=$(backend.TFSTATE_RG)" \
+                    -backend-config="storage_account_name=$(backend.TFSTATE_SA)" \
+                    -backend-config="container_name=$(backend.TFSTATE_CONTAINER)" \
+                    -backend-config="use_azuread_auth=true" \
+                    -backend-config="key=$(stampId)/compute.tfstate"
+                  
+                  terraform plan \
+                    -var="subscription_id=$(SUBSCRIPTION_ID)" \
+                    -var="stamp_id=$(stampId)" \
+                    -out=tfplan-compute \
+                    -input=false
+                addSpnToEnvironment: true
+
+          # Publish all plans as artifacts
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Plan Artifacts'
+            inputs:
+              targetPath: '$(System.DefaultWorkingDirectory)/terraform/layers'
+              artifact: 'tfplans-$(stampId)'
+
+  # =============================================================================
+  # Approval Gate for Production
+  # =============================================================================
+  - ${{ if eq(variables.isProduction, true) }}:
+    - stage: Approval
+      displayName: 'Approval Required'
+      dependsOn: Plan
+      jobs:
+        - job: WaitForApproval
+          displayName: 'Manual Approval'
+          pool: server
+          steps:
+            - task: ManualValidation@0
+              displayName: 'Approve Production Deployment'
+              inputs:
+                notifyUsers: ''
+                instructions: |
+                  Review the Terraform plan for **${{ parameters.stamp }}** before approving.
+                  
+                  Layers to deploy: ${{ parameters.layers }}
+                  
+                  Check the Plan stage artifacts for detailed changes.
+                onTimeout: 'reject'
+              timeoutInMinutes: 1440  # 24 hours
+
+  # =============================================================================
+  # Apply Stage
+  # =============================================================================
+  - stage: Apply
+    displayName: 'Apply - ${{ parameters.stamp }}'
+    dependsOn:
+      - Plan
+      - ${{ if eq(variables.isProduction, true) }}:
+        - Approval
+    condition: and(succeeded(), eq('${{ parameters.destroy }}', false))
+    jobs:
+      - deployment: ApplyInfrastructure
+        displayName: 'Apply Infrastructure'
+        environment: '${{ parameters.stamp }}'  # Links to ADO Environment for tracking
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: TerraformInstaller@1
+                  displayName: 'Install Terraform'
+                  inputs:
+                    terraformVersion: 'latest'
+
+                - task: DownloadPipelineArtifact@2
+                  displayName: 'Download Plan Artifacts'
+                  inputs:
+                    artifact: 'tfplans-$(stampId)'
+                    path: '$(System.DefaultWorkingDirectory)/terraform/layers'
+
+                - task: AzureCLI@2
+                  displayName: 'Get Bootstrap Backend Config'
+                  inputs:
+                    azureSubscription: $(serviceConnection)
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      cd terraform/layers/00-bootstrap
+                      terraform init -input=false
+                      
+                      echo "##vso[task.setvariable variable=TFSTATE_RG]$(terraform output -raw resource_group_name)"
+                      echo "##vso[task.setvariable variable=TFSTATE_SA]$(terraform output -raw storage_account_name)"
+                      echo "##vso[task.setvariable variable=TFSTATE_CONTAINER]$(terraform output -raw container_name)"
+                    addSpnToEnvironment: true
+
+                # Apply Networking
+                - ${{ if eq(variables.deployNetworking, true) }}:
+                  - task: AzureCLI@2
+                    displayName: 'Apply: 01-networking'
+                    inputs:
+                      azureSubscription: $(serviceConnection)
+                      scriptType: 'bash'
+                      scriptLocation: 'inlineScript'
+                      inlineScript: |
+                        cd terraform/layers/01-networking
+                        
+                        terraform init -input=false -reconfigure \
+                          -backend-config="resource_group_name=$(TFSTATE_RG)" \
+                          -backend-config="storage_account_name=$(TFSTATE_SA)" \
+                          -backend-config="container_name=$(TFSTATE_CONTAINER)" \
+                          -backend-config="use_azuread_auth=true" \
+                          -backend-config="key=$(stampId)/networking.tfstate"
+                        
+                        terraform apply -auto-approve -input=false tfplan-networking
+                      addSpnToEnvironment: true
+
+                # Apply Shared
+                - ${{ if eq(variables.deployShared, true) }}:
+                  - task: AzureCLI@2
+                    displayName: 'Apply: 02-shared'
+                    inputs:
+                      azureSubscription: $(serviceConnection)
+                      scriptType: 'bash'
+                      scriptLocation: 'inlineScript'
+                      inlineScript: |
+                        cd terraform/layers/02-shared
+                        
+                        terraform init -input=false -reconfigure \
+                          -backend-config="resource_group_name=$(TFSTATE_RG)" \
+                          -backend-config="storage_account_name=$(TFSTATE_SA)" \
+                          -backend-config="container_name=$(TFSTATE_CONTAINER)" \
+                          -backend-config="use_azuread_auth=true" \
+                          -backend-config="key=$(stampId)/shared.tfstate"
+                        
+                        terraform apply -auto-approve -input=false tfplan-shared
+                      addSpnToEnvironment: true
+
+                # Apply Compute
+                - ${{ if eq(variables.deployCompute, true) }}:
+                  - task: AzureCLI@2
+                    displayName: 'Apply: 04-compute'
+                    inputs:
+                      azureSubscription: $(serviceConnection)
+                      scriptType: 'bash'
+                      scriptLocation: 'inlineScript'
+                      inlineScript: |
+                        cd terraform/layers/04-compute
+                        
+                        terraform init -input=false -reconfigure \
+                          -backend-config="resource_group_name=$(TFSTATE_RG)" \
+                          -backend-config="storage_account_name=$(TFSTATE_SA)" \
+                          -backend-config="container_name=$(TFSTATE_CONTAINER)" \
+                          -backend-config="use_azuread_auth=true" \
+                          -backend-config="key=$(stampId)/compute.tfstate"
+                        
+                        terraform apply -auto-approve -input=false tfplan-compute
+                      addSpnToEnvironment: true
+
+                - task: AzureCLI@2
+                  displayName: 'Output Summary'
+                  inputs:
+                    azureSubscription: $(serviceConnection)
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "✅ Deployment complete for stamp: $(stampId)"
+                      echo ""
+                      echo "🔗 Next steps:"
+                      echo "   az aks get-credentials -g rg-$(stampId)-compute -n aks-$(stampId)"
+                    addSpnToEnvironment: true
+
+  # =============================================================================
+  # Destroy Stage (only if destroy=true)
+  # =============================================================================
+  - ${{ if eq(parameters.destroy, true) }}:
+    - stage: Destroy
+      displayName: '⚠️ DESTROY - ${{ parameters.stamp }}'
+      dependsOn: Plan
+      jobs:
+        - job: ConfirmDestroy
+          displayName: 'Confirm Destruction'
+          pool: server
+          steps:
+            - task: ManualValidation@0
+              displayName: 'Confirm DESTROY of ${{ parameters.stamp }}'
+              inputs:
+                notifyUsers: ''
+                instructions: |
+                  ⚠️ **WARNING: You are about to DESTROY infrastructure!**
+                  
+                  Stamp: **${{ parameters.stamp }}**
+                  Layers: ${{ parameters.layers }}
+                  
+                  This action is IRREVERSIBLE. All resources will be deleted.
+                  
+                  Type the stamp name to confirm: ${{ parameters.stamp }}
+                onTimeout: 'reject'
+              timeoutInMinutes: 60
+
+        - deployment: DestroyInfrastructure
+          displayName: 'Destroy Infrastructure'
+          dependsOn: ConfirmDestroy
+          environment: '${{ parameters.stamp }}'
+          pool:
+            vmImage: 'ubuntu-latest'
+          strategy:
+            runOnce:
+              deploy:
+                steps:
+                  - checkout: self
+
+                  - task: TerraformInstaller@1
+                    displayName: 'Install Terraform'
+                    inputs:
+                      terraformVersion: 'latest'
+
+                  - task: AzureCLI@2
+                    displayName: 'Get Bootstrap Backend Config'
+                    inputs:
+                      azureSubscription: $(serviceConnection)
+                      scriptType: 'bash'
+                      scriptLocation: 'inlineScript'
+                      inlineScript: |
+                        cd terraform/layers/00-bootstrap
+                        terraform init -input=false
+                        
+                        echo "##vso[task.setvariable variable=TFSTATE_RG]$(terraform output -raw resource_group_name)"
+                        echo "##vso[task.setvariable variable=TFSTATE_SA]$(terraform output -raw storage_account_name)"
+                        echo "##vso[task.setvariable variable=TFSTATE_CONTAINER]$(terraform output -raw container_name)"
+                      addSpnToEnvironment: true
+
+                  # Destroy in reverse order: compute -> shared -> networking
+                  - ${{ if eq(variables.deployCompute, true) }}:
+                    - task: AzureCLI@2
+                      displayName: 'Destroy: 04-compute'
+                      inputs:
+                        azureSubscription: $(serviceConnection)
+                        scriptType: 'bash'
+                        scriptLocation: 'inlineScript'
+                        inlineScript: |
+                          cd terraform/layers/04-compute
+                          
+                          terraform init -input=false -reconfigure \
+                            -backend-config="resource_group_name=$(TFSTATE_RG)" \
+                            -backend-config="storage_account_name=$(TFSTATE_SA)" \
+                            -backend-config="container_name=$(TFSTATE_CONTAINER)" \
+                            -backend-config="use_azuread_auth=true" \
+                            -backend-config="key=$(stampId)/compute.tfstate"
+                          
+                          terraform destroy -auto-approve -input=false \
+                            -var="subscription_id=$(SUBSCRIPTION_ID)" \
+                            -var="stamp_id=$(stampId)"
+                        addSpnToEnvironment: true
+
+                  - ${{ if eq(variables.deployShared, true) }}:
+                    - task: AzureCLI@2
+                      displayName: 'Destroy: 02-shared'
+                      inputs:
+                        azureSubscription: $(serviceConnection)
+                        scriptType: 'bash'
+                        scriptLocation: 'inlineScript'
+                        inlineScript: |
+                          cd terraform/layers/02-shared
+                          
+                          terraform init -input=false -reconfigure \
+                            -backend-config="resource_group_name=$(TFSTATE_RG)" \
+                            -backend-config="storage_account_name=$(TFSTATE_SA)" \
+                            -backend-config="container_name=$(TFSTATE_CONTAINER)" \
+                            -backend-config="use_azuread_auth=true" \
+                            -backend-config="key=$(stampId)/shared.tfstate"
+                          
+                          terraform destroy -auto-approve -input=false \
+                            -var="subscription_id=$(SUBSCRIPTION_ID)" \
+                            -var="stamp_id=$(stampId)"
+                        addSpnToEnvironment: true
+
+                  - ${{ if eq(variables.deployNetworking, true) }}:
+                    - task: AzureCLI@2
+                      displayName: 'Destroy: 01-networking'
+                      inputs:
+                        azureSubscription: $(serviceConnection)
+                        scriptType: 'bash'
+                        scriptLocation: 'inlineScript'
+                        inlineScript: |
+                          cd terraform/layers/01-networking
+                          
+                          terraform init -input=false -reconfigure \
+                            -backend-config="resource_group_name=$(TFSTATE_RG)" \
+                            -backend-config="storage_account_name=$(TFSTATE_SA)" \
+                            -backend-config="container_name=$(TFSTATE_CONTAINER)" \
+                            -backend-config="use_azuread_auth=true" \
+                            -backend-config="key=$(stampId)/networking.tfstate"
+                          
+                          terraform destroy -auto-approve -input=false \
+                            -var="subscription_id=$(SUBSCRIPTION_ID)" \
+                            -var="stamp_id=$(stampId)"
+                        addSpnToEnvironment: true
