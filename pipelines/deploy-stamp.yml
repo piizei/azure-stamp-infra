@@ -284,9 +284,10 @@ stages:
               path: '$(System.DefaultWorkingDirectory)/terraform/layers'
 
           - script: |
-              # Fix provider permissions after artifact download
-              find terraform/layers -name "terraform-provider-*" -exec chmod +x {} \;
-            displayName: 'Fix Provider Permissions'
+              # Remove .terraform directories and re-download fresh providers
+              # This avoids permission/platform issues with cached providers
+              find terraform/layers -type d -name ".terraform" -exec rm -rf {} + 2>/dev/null || true
+            displayName: 'Clean Provider Cache'
 
           - task: AzureCLI@2
             displayName: 'Compute Backend Config'
