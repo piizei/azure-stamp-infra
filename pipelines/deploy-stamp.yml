@@ -75,8 +75,17 @@ variables:
     value: ${{ parameters.stamp }}
   - name: isProduction
     value: ${{ contains(parameters.stamp, '-prod') }}
-  - name: serviceConnection
-    value: 'azure-infra-$(stampId)'  # Or use a single connection
+  
+  # Service connection based on environment suffix (dev, staging, prod)
+  - ${{ if contains(parameters.stamp, '-dev') }}:
+    - name: serviceConnection
+      value: 'azure-infra-dev'
+  - ${{ if contains(parameters.stamp, '-staging') }}:
+    - name: serviceConnection
+      value: 'azure-infra-staging'
+  - ${{ if contains(parameters.stamp, '-prod') }}:
+    - name: serviceConnection
+      value: 'azure-infra-prod'
 
   # Layer flags
   - name: deployNetworking
