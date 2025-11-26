@@ -27,13 +27,7 @@ The infrastructure is provisioned using a **layered Terraform** approach, ensuri
 
 ```mermaid
 flowchart TB
-    subgraph Legend
-        direction LR
-        L1[🔒 Private Endpoint]
-        L2[📦 Shared State]
-    end
-
-    subgraph Bootstrap["00-Bootstrap (Shared)"]
+    subgraph Bootstrap["00-Bootstrap"]
         TFState[(Terraform State<br/>Storage Account)]
     end
 
@@ -45,15 +39,15 @@ flowchart TB
         end
         
         subgraph Shared1["02-Shared"]
-            SB1[Service Bus<br/>🔒]
-            Storage1[Storage Account<br/>🔒]
+            SB1[Service Bus 🔒]
+            Storage1[Storage 🔒]
             DNS1[Private DNS Zones]
         end
         
         subgraph Compute1["04-Compute"]
-            AKS1[AKS Cluster<br/>Java-Optimized<br/>E-series VMs]
-            ACR1[ACR Premium<br/>🔒]
-            KV1[Key Vault<br/>🔒]
+            AKS1[AKS Cluster]
+            ACR1[ACR 🔒]
+            KV1[Key Vault 🔒]
         end
     end
 
@@ -65,129 +59,73 @@ flowchart TB
         end
         
         subgraph Shared2["02-Shared"]
-            SB2[Service Bus<br/>🔒]
-            Storage2[Storage Account<br/>🔒]
+            SB2[Service Bus 🔒]
+            Storage2[Storage 🔒]
             DNS2[Private DNS Zones]
         end
         
         subgraph Compute2["04-Compute"]
-            AKS2[AKS Cluster<br/>Java-Optimized<br/>E-series VMs]
-            ACR2[ACR Premium<br/>🔒]
-            KV2[Key Vault<br/>🔒]
+            AKS2[AKS Cluster]
+            ACR2[ACR 🔒]
+            KV2[Key Vault 🔒]
         end
     end
 
-    subgraph Database["03-Database (MongoDB Atlas)"]
-        Mongo[(MongoDB Cluster)]
+    subgraph Database["03-Database"]
+        Mongo[(MongoDB Atlas)]
     end
 
-    TFState -.->|state| Net1
-    TFState -.->|state| Shared1
-    TFState -.->|state| Compute1
-    TFState -.->|state| Net2
-    TFState -.->|state| Shared2
-    TFState -.->|state| Compute2
+    TFState -.-> Stamp1 & Stamp2
     
     VNet1 --> AKSSub1 & PESub1
     VNet2 --> AKSSub2 & PESub2
-    
-    PESub1 --> SB1 & Storage1 & ACR1 & KV1
-    PESub2 --> SB2 & Storage2 & ACR2 & KV2
-    
-    AKSSub1 --> AKS1
-    AKSSub2 --> AKS2
     
     AKS1 --> ACR1
     AKS2 --> ACR2
     
     AKS1 & AKS2 --> Mongo
-
-    style Bootstrap fill:#e1f5fe
-    style Stamp1 fill:#fff3e0
-    style Stamp2 fill:#f3e5f5
-    style Database fill:#e8f5e9
 ```
 
 ### Layer Dependency Flow
 
 ```mermaid
 flowchart LR
-    subgraph Layers["Terraform Layers (Deploy Order →)"]
-        L0["00-Bootstrap<br/>📦 State Backend"]
-        L1["01-Networking<br/>🌐 VNet, Subnets"]
-        L2["02-Shared<br/>📨 Service Bus, Storage"]
-        L3["03-Database<br/>🍃 MongoDB Atlas"]
-        L4["04-Compute<br/>☸️ AKS, ACR, KeyVault"]
-    end
-    
-    L0 --> L1 --> L2 --> L4
-    L0 --> L3
-    L2 -.->|optional| L4
+    L0[00-Bootstrap] --> L1[01-Networking] --> L2[02-Shared] --> L4[04-Compute]
+    L0 --> L3[03-Database]
     L3 -.->|optional| L4
-    
-    style L0 fill:#bbdefb
-    style L1 fill:#c8e6c9
-    style L2 fill:#fff9c4
-    style L3 fill:#d7ccc8
-    style L4 fill:#ffccbc
 ```
 
 ### Private Networking Architecture
 
 ```mermaid
-flowchart TB
-    subgraph VNet["Virtual Network (10.x.0.0/16)"]
-        subgraph AKSSubnet["AKS Subnet (/22 - 1022 IPs)"]
-            AKS[AKS Cluster<br/>Workload Identity]
-            Pods[Java Pods<br/>Azure CNI]
-        end
-        
-        subgraph PESubnet["Private Endpoint Subnet (/24)"]
-            PE_ACR[PE: ACR]
-            PE_KV[PE: Key Vault]
-            PE_SB[PE: Service Bus]
-            PE_ST[PE: Storage]
-        end
+flowchart LR
+    subgraph VNet["Virtual Network"]
+        AKS[AKS Cluster]
+        PE[Private Endpoints]
     end
     
-    subgraph PrivateDNS["Private DNS Zones"]
-        DNS_ACR[privatelink.azurecr.io]
-        DNS_KV[privatelink.vaultcore.azure.net]
-        DNS_SB[privatelink.servicebus.windows.net]
-        DNS_ST[privatelink.blob.core.windows.net]
+    subgraph DNS["Private DNS Zones"]
+        DNS1[privatelink.azurecr.io]
+        DNS2[privatelink.vaultcore.azure.net]
+        DNS3[privatelink.servicebus.windows.net]
+        DNS4[privatelink.blob.core.windows.net]
     end
     
-    subgraph AzureServices["Azure PaaS Services (No Public Access)"]
-        ACR[Azure Container Registry<br/>Premium SKU]
-        KV[Azure Key Vault]
-        SB[Azure Service Bus<br/>Premium]
-        ST[Azure Storage]
+    subgraph PaaS["Azure PaaS Services"]
+        ACR[Container Registry]
+        KV[Key Vault]
+        SB[Service Bus]
+        ST[Storage]
     end
     
-    Pods --> AKS
-    AKS -->|pull images| PE_ACR
-    AKS -->|get secrets| PE_KV
-    Pods -->|messaging| PE_SB
-    Pods -->|blob storage| PE_ST
-    
-    PE_ACR --> ACR
-    PE_KV --> KV
-    PE_SB --> SB
-    PE_ST --> ST
-    
-    PE_ACR -.->|resolves| DNS_ACR
-    PE_KV -.->|resolves| DNS_KV
-    PE_SB -.->|resolves| DNS_SB
-    PE_ST -.->|resolves| DNS_ST
+    AKS --> PE
+    PE -->|resolves via| DNS
+    PE --> PaaS
     
     DNS_ACR -.-> ACR
     DNS_KV -.-> KV
     DNS_SB -.-> SB
     DNS_ST -.-> ST
-    
-    style VNet fill:#e3f2fd
-    style PrivateDNS fill:#fff8e1
-    style AzureServices fill:#fce4ec
 ```
 
 Every deployment is scoped to a single **stamp**, which is defined by a `stamp_id` (used to derive names, CIDRs, and regions) and a `subscription_id`. The catalog of supported stamps lives in `terraform/modules/stamp/main.tf`; add new entries there to unlock more regions without changing any layer inputs. Globally unique resources (Storage Accounts, ACR) automatically append a deterministic hash of `stamp_id + subscription_id` so the same stamp can exist in multiple subscriptions without name collisions.
