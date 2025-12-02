@@ -18,9 +18,18 @@ output "aks" {
   value = {
     service_cidr   = local.resolved_config.service_cidr
     dns_service_ip = local.resolved_config.dns_service_ip
-    vm_size        = try(local.resolved_config.aks_vm_size, "Standard_E4s_v5")
+    vm_size        = try(local.resolved_config.aks_vm_size, "Standard_D2s_v5")
     node_count     = try(local.resolved_config.aks_node_count, 2)
     max_pods       = try(local.resolved_config.aks_max_pods, 30)
+  }
+}
+
+output "user_nodepool" {
+  value = {
+    enabled    = try(local.resolved_config.user_nodepool.enabled, false)
+    vm_size    = try(local.resolved_config.user_nodepool.vm_size, "Standard_E4s_v5")
+    node_count = try(local.resolved_config.user_nodepool.node_count, 2)
+    max_pods   = try(local.resolved_config.user_nodepool.max_pods, 30)
   }
 }
 

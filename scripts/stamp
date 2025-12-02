@@ -27,6 +27,7 @@
 #   shared, 02              -> 02-shared
 #   database, db, 03        -> 03-database
 #   compute, 04             -> 04-compute
+#   monitoring, mon, 05     -> 05-monitoring
 #
 set -euo pipefail
 
@@ -49,9 +50,9 @@ NC='\033[0m' # No Color
 BOLD='\033[1m'
 
 # All available layers (excluding bootstrap)
-ALL_LAYERS=("01-networking" "02-shared" "03-database" "04-compute")
+ALL_LAYERS=("01-networking" "02-shared" "03-database" "04-compute" "05-monitoring")
 
-# Default layers to deploy (excludes database by default)
+# Default layers to deploy (excludes database and monitoring by default)
 DEFAULT_LAYERS=("01-networking" "02-shared" "04-compute")
 
 # Active layers for current command (set by parse_layer_options)
@@ -99,9 +100,12 @@ normalize_layer() {
     compute|04|04-compute)
       echo "04-compute"
       ;;
+    monitoring|mon|05|05-monitoring)
+      echo "05-monitoring"
+      ;;
     *)
       log_error "Unknown layer: $layer"
-      log_info "Valid layers: networking, shared, database, compute (or 01, 02, 03, 04)"
+      log_info "Valid layers: networking, shared, database, compute, monitoring (or 01, 02, 03, 04, 05)"
       exit 1
       ;;
   esac
@@ -515,10 +519,19 @@ cmd_plan() {
   for layer in "${ACTIVE_LAYERS[@]}"; do
     local layer_dir="$LAYERS_DIR/$layer"
     
+    # Check for stamp-specific tfvars file
+    local var_file_flag=""
+    local tfvars_file="$layer_dir/${stamp_id}.tfvars"
+    if [[ -f "$tfvars_file" ]]; then
+      log_info "Using tfvars file: ${stamp_id}.tfvars"
+      var_file_flag="-var-file=$tfvars_file"
+    fi
+    
     log_info "Planning $layer..."
     terraform -chdir="$layer_dir" plan \
       -var="subscription_id=$subscription_id" \
-      -var="stamp_id=$stamp_id"
+      -var="stamp_id=$stamp_id" \
+      $var_file_flag
   done
   
   log_success "Plan complete!"
@@ -577,10 +590,19 @@ cmd_deploy() {
   for layer in "${ACTIVE_LAYERS[@]}"; do
     local layer_dir="$LAYERS_DIR/$layer"
     
+    # Check for stamp-specific tfvars file
+    local var_file_flag=""
+    local tfvars_file="$layer_dir/${stamp_id}.tfvars"
+    if [[ -f "$tfvars_file" ]]; then
+      log_info "Using tfvars file: ${stamp_id}.tfvars"
+      var_file_flag="-var-file=$tfvars_file"
+    fi
+    
     log_info "Deploying $layer..."
     terraform -chdir="$layer_dir" apply \
       -var="subscription_id=$subscription_id" \
       -var="stamp_id=$stamp_id" \
+      $var_file_flag \
       $approve_flag
     
     log_success "$layer deployed!"
@@ -903,8 +925,9 @@ Layer Selection:
     shared, 02            -> 02-shared
     database, db, 03      -> 03-database
     compute, 04           -> 04-compute
+    monitoring, mon, 05   -> 05-monitoring
 
-  Default layers: networking, shared, compute (database skipped by default)
+  Default layers: networking, shared, compute (database and monitoring skipped by default)
 
 Options:
   --auto-approve, -y      Skip confirmation prompts

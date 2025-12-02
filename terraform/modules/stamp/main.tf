@@ -38,9 +38,17 @@ locals {
       dns_service_ip      = "10.10.10.10"
       service_bus_capacity   = 1
       service_bus_partitions = 1
-      aks_vm_size         = "Standard_E4s_v5"  # Memory-optimized for JVM
+      # System nodepool (smaller, for system components)
+      aks_vm_size         = "Standard_D2s_v5"
       aks_node_count      = 2
       aks_max_pods        = 30
+      # User nodepool (memory-optimized for Java applications)
+      user_nodepool = {
+        enabled    = true
+        vm_size    = "Standard_E4s_v5"  # Memory-optimized for JVM
+        node_count = 2
+        max_pods   = 30
+      }
       shared = {
         enabled = true
       }
@@ -57,9 +65,17 @@ locals {
       dns_service_ip      = "10.11.10.10"
       service_bus_capacity   = 1
       service_bus_partitions = 1
-      aks_vm_size         = "Standard_E4s_v5"
-      aks_node_count      = 3
+      # System nodepool
+      aks_vm_size         = "Standard_D2s_v5"
+      aks_node_count      = 2
       aks_max_pods        = 30
+      # User nodepool (memory-optimized for Java applications)
+      user_nodepool = {
+        enabled    = true
+        vm_size    = "Standard_E4s_v5"
+        node_count = 3
+        max_pods   = 30
+      }
       shared = {
         enabled = true
       }
@@ -76,9 +92,17 @@ locals {
       dns_service_ip      = "10.12.10.10"
       service_bus_capacity   = 4
       service_bus_partitions = 4
-      aks_vm_size         = "Standard_E8s_v5"
+      # System nodepool
+      aks_vm_size         = "Standard_D4s_v5"
       aks_node_count      = 3
       aks_max_pods        = 30
+      # User nodepool (memory-optimized for Java applications)
+      user_nodepool = {
+        enabled    = true
+        vm_size    = "Standard_E8s_v5"
+        node_count = 3
+        max_pods   = 30
+      }
       shared = {
         enabled = true
       }
@@ -99,9 +123,17 @@ locals {
       dns_service_ip      = "10.20.10.10"
       service_bus_capacity   = 1
       service_bus_partitions = 1
-      aks_vm_size         = "Standard_E4s_v5"
+      # System nodepool
+      aks_vm_size         = "Standard_D2s_v5"
       aks_node_count      = 2
       aks_max_pods        = 30
+      # User nodepool (memory-optimized for Java applications)
+      user_nodepool = {
+        enabled    = true
+        vm_size    = "Standard_E4s_v5"
+        node_count = 2
+        max_pods   = 30
+      }
       shared = {
         enabled = true
       }
@@ -118,9 +150,17 @@ locals {
       dns_service_ip      = "10.21.10.10"
       service_bus_capacity   = 4
       service_bus_partitions = 4
-      aks_vm_size         = "Standard_E8s_v5"
+      # System nodepool
+      aks_vm_size         = "Standard_D4s_v5"
       aks_node_count      = 3
       aks_max_pods        = 30
+      # User nodepool (memory-optimized for Java applications)
+      user_nodepool = {
+        enabled    = true
+        vm_size    = "Standard_E8s_v5"
+        node_count = 3
+        max_pods   = 30
+      }
       shared = {
         enabled = true
       }
@@ -185,6 +225,11 @@ locals {
     private_dns_zone_sb      = "privatelink.servicebus.windows.net"
     private_dns_zone_acr     = "privatelink.azurecr.io"
     private_dns_zone_kv      = "privatelink.vaultcore.azure.net"
+    # Monitoring resources
+    monitoring_rg            = "rg-${local.sanitized_dns_safe}-monitoring"
+    log_analytics_workspace  = "log-${local.sanitized_dns_safe}"
+    app_insights             = "appi-${local.sanitized_dns_safe}"
+    action_group             = "ag-${local.sanitized_dns_safe}-alerts"
   }
 
   # Backend config for shared bootstrap storage
@@ -199,6 +244,7 @@ locals {
     shared_key           = "${local.normalized_stamp_id}/shared.tfstate"
     database_key         = "${local.normalized_stamp_id}/database.tfstate"
     compute_key          = "${local.normalized_stamp_id}/compute.tfstate"
+    monitoring_key       = "${local.normalized_stamp_id}/monitoring.tfstate"
   }
 
   tags = {

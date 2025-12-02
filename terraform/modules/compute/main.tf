@@ -13,16 +13,19 @@ resource "azurerm_kubernetes_cluster" "this" {
   tags                = var.tags
 
   default_node_pool {
-    name           = "default"
+    name           = "system"
     node_count     = var.aks_node_count
     vm_size        = var.aks_vm_size
     vnet_subnet_id = var.aks_subnet_id
     zones          = [1, 2, 3]
     max_pods       = var.aks_max_pods
 
-    # Java workload optimizations
+    # System nodepool optimizations
     os_disk_size_gb = 128
     os_disk_type    = "Managed"
+
+    # Taint system nodes to only run system pods
+    only_critical_addons_enabled = true
   }
 
   identity {
@@ -40,6 +43,34 @@ resource "azurerm_kubernetes_cluster" "this" {
   # Enable OIDC for workload identity (useful for Java apps connecting to Azure services)
   oidc_issuer_enabled       = true
   workload_identity_enabled = true
+
+  # Enable web application routing (managed NGINX ingress controller)
+  web_app_routing {
+    dns_zone_ids = []  # Empty for public ingress without custom DNS
+  }
+}
+
+# User nodepool for application workloads (memory-optimized for Java)
+resource "azurerm_kubernetes_cluster_node_pool" "apps" {
+  count                 = var.user_nodepool_enabled ? 1 : 0
+  name                  = "apps"
+  kubernetes_cluster_id = azurerm_kubernetes_cluster.this.id
+  vm_size               = var.user_nodepool_vm_size
+  node_count            = var.user_nodepool_node_count
+  vnet_subnet_id        = var.aks_subnet_id
+  zones                 = [1, 2, 3]
+  max_pods              = var.user_nodepool_max_pods
+  mode                  = "User"
+
+  # Java workload optimizations
+  os_disk_size_gb = 128
+  os_disk_type    = "Managed"
+
+  node_labels = {
+    "workload" = "apps"
+  }
+
+  tags = var.tags
 }
 
 resource "azurerm_key_vault" "this" {

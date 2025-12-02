@@ -25,6 +25,34 @@ resource "azurerm_network_security_group" "aks" {
   location            = var.location
   resource_group_name = var.resource_group_name
   tags                = var.tags
+
+  # Allow HTTP/HTTPS inbound from Internet (for ingress controller)
+  security_rule {
+    name                       = "AllowHTTPInbound"
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_ranges    = ["80", "443"]
+    source_address_prefix      = "Internet"
+    destination_address_prefix = "*"
+    description                = "Allow HTTP/HTTPS inbound from Internet for ingress"
+  }
+
+  # Allow health probe traffic from Azure Load Balancer
+  security_rule {
+    name                       = "AllowLoadBalancerProbes"
+    priority                   = 110
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_ranges    = ["30000-32767"]  # NodePort range
+    source_address_prefix      = "AzureLoadBalancer"
+    destination_address_prefix = "*"
+    description                = "Allow health probe traffic from Azure Load Balancer"
+  }
 }
 
 resource "azurerm_subnet_network_security_group_association" "aks" {

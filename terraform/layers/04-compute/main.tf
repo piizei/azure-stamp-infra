@@ -105,9 +105,15 @@ module "compute" {
   dns_prefix             = module.stamp.naming.dns_prefix
   identity_name          = module.stamp.naming.user_assigned_identity
   key_vault_name_prefix  = module.stamp.naming.key_vault_prefix
+  # System nodepool configuration
   aks_vm_size            = module.stamp.aks.vm_size
   aks_node_count         = module.stamp.aks.node_count
   aks_max_pods           = module.stamp.aks.max_pods
+  # User nodepool configuration (for application workloads)
+  user_nodepool_enabled    = module.stamp.user_nodepool.enabled
+  user_nodepool_vm_size    = module.stamp.user_nodepool.vm_size
+  user_nodepool_node_count = module.stamp.user_nodepool.node_count
+  user_nodepool_max_pods   = module.stamp.user_nodepool.max_pods
   tags                   = module.stamp.tags
 }
 

@@ -27,11 +27,12 @@ service:
   port: 80
 
 ingress:
-  enabled: false
-  className: ""
+  enabled: true
+  # Uses the AKS application routing add-on managed NGINX ingress controller
+  className: "webapprouting.kubernetes.azure.com"
   annotations: {}
   hosts:
-    - host: helloworld.local
+    - host: ""  # Empty host allows access via IP address
       paths:
         - path: /
           pathType: Prefix
@@ -50,6 +51,22 @@ nodeSelector: {}
 tolerations: []
 
 affinity: {}
+
+# Topology spread constraints for multi-zone distribution
+# Ensures pods are spread across availability zones for high availability
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: helloworld
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: helloworld
 
 # Environment variables
 env:

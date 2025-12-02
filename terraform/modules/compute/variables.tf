@@ -45,19 +45,44 @@ variable "key_vault_name_prefix" {
 }
 
 variable "aks_vm_size" {
-  description = "VM size for AKS default node pool (memory-optimized recommended for JVM)"
+  description = "VM size for AKS system node pool"
   type        = string
-  default     = "Standard_E4s_v5"
+  default     = "Standard_D2s_v5"
 }
 
 variable "aks_node_count" {
-  description = "Number of nodes in the default node pool"
+  description = "Number of nodes in the system node pool"
   type        = number
   default     = 2
 }
 
 variable "aks_max_pods" {
   description = "Maximum number of pods per node (Azure CNI recommended: 30)"
+  type        = number
+  default     = 30
+}
+
+# User nodepool configuration (for application workloads)
+variable "user_nodepool_enabled" {
+  description = "Whether to create a dedicated user nodepool for applications"
+  type        = bool
+  default     = true
+}
+
+variable "user_nodepool_vm_size" {
+  description = "VM size for user node pool (memory-optimized recommended for JVM)"
+  type        = string
+  default     = "Standard_E4s_v5"
+}
+
+variable "user_nodepool_node_count" {
+  description = "Number of nodes in the user node pool"
+  type        = number
+  default     = 2
+}
+
+variable "user_nodepool_max_pods" {
+  description = "Maximum number of pods per node in user nodepool"
   type        = number
   default     = 30
 }

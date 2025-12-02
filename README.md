@@ -19,6 +19,9 @@ export ARM_SUBSCRIPTION_ID="your-subscription-id"
 
 # Or do everything in one command:
 ./scripts/stamp deploy-all swc-dev
+
+# Deploy just few layers:
+./scripts/stamp deploy swc-dev --layers networking,compute
 ```
 
 ## Architecture Overview
@@ -156,6 +159,7 @@ The Terraform configuration is split into five distinct layers, each with its ow
 3.  **`02-shared`**: Deploys shared resources (Azure Service Bus, Storage Account) with Private Endpoints and DNS Zones.
 4.  **`03-database`**: Manages MongoDB Atlas clusters and database users.
 5.  **`04-compute`**: Deploys the application runtime (AKS, ACR Premium with PE, Key Vault) and configures Identity/RBAC.
+6.  **`05-monitoring`**: Deploys Application Insights availability tests and alerts for endpoint monitoring.
 
 ---
 
@@ -224,6 +228,7 @@ Use `--layers` or `--skip` to customize which layers to deploy:
 | `02-shared` | `shared`, `02` |
 | `03-database` | `database`, `db`, `03` |
 | `04-compute` | `compute`, `04` |
+| `05-monitoring` | `monitoring`, `mon`, `05` |
 
 ### Using Make Shortcuts
 
@@ -332,6 +337,7 @@ All higher layers look up the backend coordinates from the bootstrap outputs:
 ./scripts/init-layer.sh 02-shared
 ./scripts/init-layer.sh 03-database
 ./scripts/init-layer.sh 04-compute
+./scripts/init-layer.sh 05-monitoring
 ```
 
 #### 3. Deploy Layers
@@ -358,6 +364,7 @@ Deploy the layers in numerical order:
   -var="subscription_id=<SUBSCRIPTION_ID>" \
   -var="stamp_id=swc-dev"
 ```
+
 
 #### 4. Clone to Another Environment
 To deploy the same architecture to staging or production:
@@ -420,7 +427,8 @@ terraform/
 │   ├── 01-networking/  # VNets, Subnets (/22), NSGs
 │   ├── 02-shared/      # Service Bus, Storage, Private DNS Zones
 │   ├── 03-database/    # MongoDB Atlas
-│   └── 04-compute/     # AKS, ACR Premium, Key Vault, Private Endpoints
+│   ├── 04-compute/     # AKS, ACR Premium, Key Vault, Private Endpoints
+│   └── 05-monitoring/  # Application Insights, availability tests, alerts
 └── modules/
     ├── stamp/          # Stamp catalog and naming conventions
     ├── networking/     # Reusable networking logic
@@ -547,6 +555,78 @@ Each stamp's environment (dev/staging/prod) automatically selects the appropriat
 | `neu-prod` | prod | `values-prod.yaml` |
 
 See [apps/README.md](apps/README.md) for detailed application documentation.
+
+---
+
+## Monitoring
+
+The `05-monitoring` layer deploys Azure Application Insights with availability tests to monitor your endpoints.
+
+> **Important**: Since applications are exposed via dynamic ingress IPs (no public DNS records), you must update the tfvars configuration file with the correct IP address **before** deploying the monitoring layer. First deploy your application, get the ingress IP, then update the tfvars file.
+
+### Deploying Monitoring
+
+```bash
+# 1. First, deploy compute layer and your application
+./scripts/stamp deploy swc-dev
+
+# 2. Deploy your app (e.g., helloworld)
+helm upgrade --install helloworld ./apps/helloworld -n helloworld --create-namespace
+
+# 3. Get the ingress IP (wait 1-2 minutes for IP assignment)
+kubectl get ingress -n helloworld -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}'
+
+# 4. Update terraform/layers/05-monitoring/swc-dev.tfvars with the IP
+
+# 5. Deploy monitoring layer
+./scripts/stamp deploy swc-dev --layers monitoring
+```
+
+### Configuring Availability Tests
+
+Create a tfvars file to configure which endpoints to monitor. Example `terraform/layers/05-monitoring/swc-dev.tfvars`:
+
+```hcl
+alert_email_addresses = [
+  "your-email@example.com"
+]
+
+availability_tests = {
+  helloworld = {
+    name                 = "helloworld-availability"
+    url                  = "http://4.165.31.7/"  # Your ingress IP
+    frequency            = 300                   # Check every 5 minutes
+    timeout              = 120                   # 2 minute timeout
+    expected_status_code = 200
+    ssl_check_enabled    = false
+    geo_locations        = ["emea-nl-ams-azr", "emea-gb-db3-azr", "emea-se-sto-edge"]
+    failed_location_count = 2                    # Alert if 2+ locations fail
+    alert_severity       = 1                     # Error severity
+    alert_enabled        = true
+  }
+}
+```
+
+Then apply with the tfvars file:
+
+```bash
+cd terraform/layers/05-monitoring
+terraform apply \
+  -var="subscription_id=$ARM_SUBSCRIPTION_ID" \
+  -var="stamp_id=swc-dev" \
+  -var-file="swc-dev.tfvars"
+```
+
+### Available Geo Locations
+
+| Location Code | Region |
+|---------------|--------|
+| `emea-nl-ams-azr` | Amsterdam, Netherlands |
+| `emea-gb-db3-azr` | Dublin, Ireland |
+| `emea-se-sto-edge` | Stockholm, Sweden |
+| `emea-fr-pra-edge` | Paris, France |
+| `us-va-ash-azr` | Virginia, US |
+| `apac-sg-sin-azr` | Singapore |
 
 ---
 
