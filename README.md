@@ -52,6 +52,12 @@ flowchart TB
             ACR1[ACR 🔒]
             KV1[Key Vault 🔒]
         end
+
+        subgraph Mon1["05-Monitoring"]
+            LAW1[Log Analytics]
+            AppI1[App Insights]
+            Avail1[Availability Tests]
+        end
     end
 
     subgraph Stamp2["Stamp: neu-prod (North Europe)"]
@@ -72,6 +78,12 @@ flowchart TB
             ACR2[ACR 🔒]
             KV2[Key Vault 🔒]
         end
+
+        subgraph Mon2["05-Monitoring"]
+            LAW2[Log Analytics]
+            AppI2[App Insights]
+            Avail2[Availability Tests]
+        end
     end
 
     subgraph Database["03-Database"]
@@ -87,13 +99,16 @@ flowchart TB
     AKS2 --> ACR2
     
     AKS1 & AKS2 --> Mongo
+    
+    AKS1 -.-> AppI1
+    AKS2 -.-> AppI2
 ```
 
 ### Layer Dependency Flow
 
 ```mermaid
 flowchart LR
-    L0[00-Bootstrap] --> L1[01-Networking] --> L2[02-Shared] --> L4[04-Compute]
+    L0[00-Bootstrap] --> L1[01-Networking] --> L2[02-Shared] --> L4[04-Compute] --> L5[05-Monitoring]
     L0 --> L3[03-Database]
     L3 -.->|optional| L4
 ```
@@ -432,7 +447,8 @@ terraform/
 └── modules/
     ├── stamp/          # Stamp catalog and naming conventions
     ├── networking/     # Reusable networking logic
-    └── compute/        # Reusable compute logic (Java-optimized AKS)
+    ├── compute/        # Reusable compute logic (Java-optimized AKS)
+    └── monitoring/     # Application Insights, availability tests, alerts
 apps/
 ├── README.md           # Application deployment documentation
 └── petclinic/          # Spring PetClinic Helm chart
